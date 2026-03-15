@@ -52,8 +52,20 @@ class TestPresets:
         assert p.crawl is True
         assert p.passive_sources is True
 
+    def test_standard_preset(self):
+        p = PRESETS["standard"]
+        assert p.ports == "top1000"
+        assert p.grab_banners is True
+        assert p.dns is True
+        assert p.http is True
+        assert p.ssl is True
+        assert p.whois is True
+        assert p.subdomains is False
+        assert p.crawl is False
+        assert p.udp is False
+
     def test_all_presets_exist(self):
-        for name in ("quick", "web", "external", "full"):
+        for name in ("quick", "standard", "web", "external", "full"):
             assert name in PRESETS
 
 

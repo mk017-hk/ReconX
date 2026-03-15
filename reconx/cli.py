@@ -67,7 +67,7 @@ def cli() -> None:
 @click.argument("target")
 # Core
 @click.option("--profile", "-P", default=None,
-              help="Config preset: quick | web | external | full")
+              help="Config preset: quick | standard | web | external | full")
 @click.option("--config", default=None,
               help="Path to YAML/TOML config file")
 # Port scan
@@ -458,11 +458,11 @@ def udpscan(target: str, ports: str, timeout: float) -> None:
 @click.argument("target")
 @click.option("--passive/--no-passive", default=True, show_default=True)
 @click.option("--wordlist", "-w", default=None)
-def subdomenum(domain: str, passive: bool, wordlist: Optional[str]) -> None:
+def subdomenum(target: str, passive: bool, wordlist: Optional[str]) -> None:
     """Subdomain enumeration only."""
     print_banner(__version__)
     print_section("Subdomain Enumeration", "🌐")
-    result = asyncio.run(subdomain.enumerate(domain, wordlist_path=wordlist, use_passive=passive))
+    result = asyncio.run(subdomain.enumerate(target, wordlist_path=wordlist, use_passive=passive))
     display_subdomain_result(result)
 
 

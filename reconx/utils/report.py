@@ -24,8 +24,11 @@ from reconx import __version__
 # ─────────────────────────────────────────────────────────────
 
 def _serialise(obj: Any) -> Any:
+    from enum import Enum
+    if isinstance(obj, Enum):
+        return obj.value
     if hasattr(obj, "__dataclass_fields__"):
-        return {k: _serialise(v) for k, v in asdict(obj).items()}
+        return {k: _serialise(getattr(obj, k)) for k in obj.__dataclass_fields__}
     if isinstance(obj, list):
         return [_serialise(i) for i in obj]
     if isinstance(obj, dict):
@@ -91,16 +94,30 @@ def _section(title: str, icon: str, content: str, anchor: str = "",
 
 
 def _findings_html(findings: list, module: str = "") -> str:
-    """Render a list of findings. Accepts str or Finding objects."""
+    """
+    Render a list of findings as HTML rows.
+
+    Accepts:
+      - Finding dataclass objects (severity, title, detail, module)
+      - Plain strings (severity auto-classified)
+      - Dicts with "sev", "title", "module" keys (internal use)
+    """
     if not findings:
         return '<div class="empty">No findings.</div>'
     html = ""
     for f in findings:
         if hasattr(f, "severity") and hasattr(f, "title"):
+            # Finding dataclass
             sev = f.severity.value if hasattr(f.severity, "value") else str(f.severity)
             title = f.title
             detail = getattr(f, "detail", "")
             mod = getattr(f, "module", module)
+        elif isinstance(f, dict) and "sev" in f:
+            # Internal dict format {"sev": ..., "title": ..., "module": ...}
+            sev = f["sev"]
+            title = f.get("title", "")
+            detail = f.get("detail", "")
+            mod = f.get("module", module)
         else:
             title = str(f)
             detail = ""
@@ -683,9 +700,7 @@ def generate_html(data: dict, output_path: str) -> str:
                 cards.insert(0, ("findings", str(counts[sev]), f"{sev} Findings", col_class))
 
         chart_html = f'<div class="chart-box">{_severity_chart(counts)}</div>'
-        findings_content = chart_html + "<br>" + _findings_html(
-            [type("F", (), {"severity": type("S", (), {"value": f["sev"]})(), "title": f["title"], "detail": "", "module": f["module"]})() for f in all_findings]
-        )
+        findings_content = chart_html + "<br>" + _findings_html(all_findings)
         sections_html = _section("Security Findings", "⚠️", findings_content, "findings") + sections_html
         nav_links = '<a href="#findings">⚠️ Findings</a>' + nav_links
 

@@ -62,8 +62,6 @@ def print_finding(msg: str, level: str = "warn") -> None:
 # ─────────────────────────────────────────────────────────────
 
 def display_scan_result(result) -> None:
-    from reconx.core.scanner import ScanResult
-
     if result.error:
         print_error(f"Port scan failed: {result.error}")
         return
@@ -75,17 +73,20 @@ def display_scan_result(result) -> None:
         header_style="bold cyan",
         border_style="dim",
     )
-    table.add_column("Port", style="bold green", width=8)
+    table.add_column("Port",    style="bold green", width=8)
     table.add_column("Service", width=14)
-    table.add_column("Version", width=28, style="cyan")
-    table.add_column("Banner", style="dim")
+    table.add_column("Product", width=20, style="cyan")
+    table.add_column("Version", width=16)
+    table.add_column("Banner",  style="dim")
 
     for p in result.open_ports:
+        conf_style = "green" if getattr(p, "confidence", "") == "high" else "dim"
         table.add_row(
             str(p.port),
             p.service,
-            p.version[:28] if p.version else "",
-            p.banner[:60] if p.banner else "",
+            getattr(p, "product", "")[:20] or "",
+            f"[{conf_style}]{p.version[:16]}[/{conf_style}]" if p.version else "",
+            p.banner[:55] if p.banner else "",
         )
 
     if not result.open_ports:
@@ -380,7 +381,6 @@ def display_passive_result(result) -> None:
 
 
 def display_severity_summary(findings) -> None:
-    from reconx.core.severity import Severity, SEVERITY_ORDER
     if not findings:
         return
 
@@ -391,10 +391,10 @@ def display_severity_summary(findings) -> None:
 
     styles = {
         "CRITICAL": "bold red",
-        "HIGH": "bold orange3",
-        "MEDIUM": "bold yellow",
-        "LOW": "dim green",
-        "INFO": "dim",
+        "HIGH":     "bold orange3",
+        "MEDIUM":   "bold yellow",
+        "LOW":      "dim green",
+        "INFO":     "dim",
     }
 
     console.print("\n  [bold]Findings by severity:[/bold]")
@@ -408,5 +408,7 @@ def display_severity_summary(findings) -> None:
     for f in findings:
         sev = f.severity.value if hasattr(f.severity, "value") else str(f.severity)
         style = styles.get(sev, "dim")
-        mod = f"[dim][{f.module}][/dim] " if f.module else ""
-        console.print(f"  [{style}]{sev:10}[/{style}]  {mod}{f.title}")
+        # Show [category] if available, otherwise [module]
+        category = getattr(f, "category", "") or getattr(f, "module", "")
+        tag = f"[dim][{category}][/dim] " if category else ""
+        console.print(f"  [{style}]{sev:10}[/{style}]  {tag}{f.title}")
