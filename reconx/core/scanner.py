@@ -7,6 +7,8 @@ import socket
 from dataclasses import dataclass, field
 from typing import Optional
 
+from rich.progress import Progress, SpinnerColumn, BarColumn, TaskProgressColumn, TextColumn
+
 # Common service banners / port-to-service map
 SERVICE_MAP: dict[int, str] = {
     21: "FTP", 22: "SSH", 23: "Telnet", 25: "SMTP", 53: "DNS",
@@ -140,12 +142,30 @@ async def scan(
         return ScanResult(host=target, error=f"DNS resolution failed: {exc}")
 
     semaphore = asyncio.Semaphore(concurrency)
-    tasks = [
-        _scan_port(target, port, semaphore, timeout, grab_banners)
-        for port in ports
-    ]
 
-    results = await asyncio.gather(*tasks)
+    with Progress(
+        SpinnerColumn(),
+        TextColumn("[bold cyan]{task.description}"),
+        BarColumn(),
+        TaskProgressColumn(),
+        TextColumn("[dim]{task.fields[open]} open"),
+        transient=True,
+    ) as progress:
+        task_id = progress.add_task(
+            f"Scanning {target}", total=len(ports), open=0
+        )
+        open_count = 0
+
+        async def _tracked(port: int) -> Optional[PortResult]:
+            nonlocal open_count
+            result = await _scan_port(target, port, semaphore, timeout, grab_banners)
+            if result is not None:
+                open_count += 1
+            progress.update(task_id, advance=1, open=open_count)
+            return result
+
+        results = await asyncio.gather(*[_tracked(p) for p in ports])
+
     open_ports = sorted(
         [r for r in results if r is not None],
         key=lambda r: r.port,

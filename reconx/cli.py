@@ -87,6 +87,8 @@ def cli() -> None:
               help="Directory to save reports")
 @click.option("--quiet", "-q", is_flag=True, default=False,
               help="Suppress banner and progress output")
+@click.option("--targets-file", "-T", default=None,
+              help="File with newline-separated targets for batch scanning")
 def scan(
     target: str,
     ports: str,
@@ -107,6 +109,7 @@ def scan(
     report_name: Optional[str],
     output_dir: str,
     quiet: bool,
+    targets_file: Optional[str],
 ) -> None:
     """
     Run a full or selective reconnaissance scan against TARGET.
@@ -117,39 +120,65 @@ def scan(
       reconx scan example.com\n
       reconx scan example.com --all --report example_recon\n
       reconx scan 192.168.1.1 --ports 1-1024 --no-ssl --no-whois\n
-      reconx scan example.com --subdomains --wordlist /usr/share/wordlists/subdomains.txt
+      reconx scan example.com --subdomains --wordlist /usr/share/wordlists/subdomains.txt\n
+      reconx scan placeholder --targets-file targets.txt --report batch
     """
     if run_all:
         dns = http = run_ssl = run_whois = subdomains = True
 
+    # Build target list
+    targets: list[str] = []
+    if targets_file:
+        tf = Path(targets_file)
+        if not tf.exists():
+            print_error(f"Targets file not found: {targets_file}")
+            sys.exit(1)
+        targets = [
+            line.strip()
+            for line in tf.read_text().splitlines()
+            if line.strip() and not line.startswith("#")
+        ]
+        if not targets:
+            print_error("Targets file is empty.")
+            sys.exit(1)
+    else:
+        targets = [target]
+
     if not quiet:
         print_banner(__version__)
 
-    print_info(f"Target: [bold cyan]{target}[/bold cyan]")
-    print_info(f"Started: {datetime.datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S')} UTC\n")
+    if len(targets) > 1:
+        print_info(f"Batch mode: [bold cyan]{len(targets)} targets[/bold cyan]")
 
-    collected: dict = {"target": target}
+    for i, tgt in enumerate(targets, 1):
+        if len(targets) > 1:
+            console.rule(f"[bold magenta]Target {i}/{len(targets)}: {tgt}[/bold magenta]")
+        print_info(f"Target: [bold cyan]{tgt}[/bold cyan]")
+        print_info(f"Started: {datetime.datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S')} UTC\n")
 
-    asyncio.run(_run_scan(
-        target=target,
-        ports_spec=ports,
-        concurrency=concurrency,
-        timeout=timeout,
-        grab_banners=not no_banners,
-        run_dns=dns,
-        run_subdomains=subdomains,
-        wordlist=wordlist,
-        use_passive=not no_passive,
-        run_http=http,
-        http_ports_spec=http_ports,
-        probe_paths=not no_path_probe,
-        run_ssl=run_ssl,
-        ssl_port=ssl_port,
-        run_whois=run_whois,
-        report_name=report_name,
-        output_dir=output_dir,
-        collected=collected,
-    ))
+        collected: dict = {"target": tgt}
+        tgt_report = f"{report_name}_{tgt.replace('.', '_')}" if (report_name and len(targets) > 1) else report_name
+
+        asyncio.run(_run_scan(
+            target=tgt,
+            ports_spec=ports,
+            concurrency=concurrency,
+            timeout=timeout,
+            grab_banners=not no_banners,
+            run_dns=dns,
+            run_subdomains=subdomains,
+            wordlist=wordlist,
+            use_passive=not no_passive,
+            run_http=http,
+            http_ports_spec=http_ports,
+            probe_paths=not no_path_probe,
+            run_ssl=run_ssl,
+            ssl_port=ssl_port,
+            run_whois=run_whois,
+            report_name=tgt_report,
+            output_dir=output_dir,
+            collected=collected,
+        ))
 
 
 async def _run_scan(
@@ -315,3 +344,49 @@ def httpprobe(target: str, ports: str, no_path_probe: bool) -> None:
     port_list = [int(p.strip()) for p in ports.split(",") if p.strip()]
     results = asyncio.run(http_probe.probe(target, ports=port_list, probe_paths=not no_path_probe))
     display_http_results(results)
+
+
+@cli.command("install-completion")
+@click.argument("shell", type=click.Choice(["bash", "zsh", "fish"]), default="bash")
+def install_completion(shell: str) -> None:
+    """Install shell tab-completion for reconx.
+
+    \b
+    Usage:
+      reconx install-completion bash   # writes to ~/.bash_completion.d/
+      reconx install-completion zsh    # writes to ~/.zsh/completions/
+      reconx install-completion fish   # writes to ~/.config/fish/completions/
+    """
+    import subprocess
+    import os
+
+    env_var = f"_RECONX_COMPLETE={shell}_source"
+    try:
+        result = subprocess.run(
+            ["reconx"],
+            env={**os.environ, "_RECONX_COMPLETE": f"{shell}_source"},
+            capture_output=True,
+            text=True,
+        )
+        script = result.stdout
+    except FileNotFoundError:
+        print_error("reconx not found on PATH. Run: pip install -e .")
+        return
+
+    if shell == "bash":
+        dest = Path.home() / ".bash_completion.d" / "reconx"
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        dest.write_text(script)
+        print_success(f"Bash completion installed: {dest}")
+        print_info("Add this to ~/.bashrc:  source ~/.bash_completion.d/reconx")
+    elif shell == "zsh":
+        dest = Path.home() / ".zsh" / "completions" / "_reconx"
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        dest.write_text(script)
+        print_success(f"Zsh completion installed: {dest}")
+        print_info("Ensure ~/.zsh/completions is in your fpath.")
+    elif shell == "fish":
+        dest = Path.home() / ".config" / "fish" / "completions" / "reconx.fish"
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        dest.write_text(script)
+        print_success(f"Fish completion installed: {dest}")

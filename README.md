@@ -11,6 +11,10 @@
 
 **All-in-one Reconnaissance & Pentesting Toolkit**
 
+[![CI](https://github.com/mk017-hk/ReconX/actions/workflows/ci.yml/badge.svg)](https://github.com/mk017-hk/ReconX/actions/workflows/ci.yml)
+[![Python](https://img.shields.io/badge/python-3.10%2B-blue)](https://www.python.org/)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+
 > For authorised security testing only.
 
 ---
@@ -19,13 +23,14 @@
 
 | Module | Capability |
 |---|---|
-| **Port Scanner** | Async TCP scanning, banner grabbing, service detection |
+| **Port Scanner** | Async TCP scanning with real-time progress bar, banner grabbing, service detection |
 | **DNS Enumeration** | A/AAAA/MX/NS/TXT/SOA/CAA records, zone transfer attempts, SPF/DMARC checks |
-| **Subdomain Enumeration** | DNS bruteforce + Certificate Transparency (crt.sh) + HackerTarget passive DNS |
+| **Subdomain Enumeration** | DNS bruteforce (5 000-entry wordlist) + Certificate Transparency (crt.sh) + HackerTarget passive DNS |
 | **HTTP Probing** | Tech fingerprinting (server/CMS/WAF/CDN/framework/JS libs), security header analysis, interesting path discovery |
 | **SSL/TLS Analysis** | Certificate validity, expiry, SANs, deprecated protocol detection, weak cipher detection |
 | **WHOIS** | Registrar, dates, name servers, registrant info |
 | **Report Generator** | Self-contained HTML report + JSON export |
+| **Batch Mode** | Scan multiple targets from a file with `--targets-file` |
 
 ---
 
@@ -34,41 +39,61 @@
 ### Install
 
 ```bash
-pip install -r requirements.txt
-# or install as a package:
 pip install -e .
+```
+
+### Docker
+
+```bash
+docker build -t reconx .
+docker run --rm reconx scan example.com --all
+# save reports to host:
+docker run --rm -v $(pwd)/reports:/reports reconx scan example.com --all --report example --output-dir /reports
 ```
 
 ### Run a full scan
 
 ```bash
-python main.py scan example.com --all --report example_recon
+reconx scan example.com --all --report example_recon
+```
+
+### Scan multiple targets at once
+
+```bash
+# targets.txt — one target per line
+reconx scan placeholder --targets-file targets.txt --all --report batch
 ```
 
 ### Run specific modules
 
 ```bash
 # Port scan only
-python main.py scan example.com --no-dns --no-http --no-ssl --no-whois
+reconx scan example.com --no-dns --no-http --no-ssl --no-whois
 
 # Full scan with subdomain enumeration + report
-python main.py scan example.com --all --subdomains --report my_report
+reconx scan example.com --all --subdomains --report my_report
 
 # Custom port range
-python main.py scan example.com --ports 1-1024 --concurrency 500
+reconx scan example.com --ports 1-1024 --concurrency 500
 
 # Quick port scan
-python main.py portscan 192.168.1.1 --ports 22,80,443,3306,5432
+reconx portscan 192.168.1.1 --ports 22,80,443,3306,5432
 ```
 
 ### Standalone commands
 
 ```bash
-python main.py dnsenum example.com
-python main.py subdomenum example.com --wordlist /path/to/wordlist.txt
-python main.py sslcheck example.com --port 443
-python main.py whoislookup example.com
-python main.py httpprobe example.com --ports 80,443,8080
+reconx dnsenum example.com
+reconx subdomenum example.com --wordlist /path/to/wordlist.txt
+reconx sslcheck example.com --port 443
+reconx whoislookup example.com
+reconx httpprobe example.com --ports 80,443,8080
+```
+
+### Shell tab-completion
+
+```bash
+reconx install-completion bash   # or zsh / fish
 ```
 
 ---
@@ -76,7 +101,7 @@ python main.py httpprobe example.com --ports 80,443,8080
 ## Usage Reference
 
 ```
-Usage: python main.py scan [OPTIONS] TARGET
+Usage: reconx scan [OPTIONS] TARGET
 
 Options:
   -p, --ports TEXT          Port spec: top100, top1000, all, 1-1024, 22,80,443
@@ -97,6 +122,7 @@ Options:
   -r, --report TEXT         Report base name (saves JSON + HTML)
   -o, --output-dir TEXT     Report output directory [default: reports]
   -q, --quiet               Suppress banner output
+  -T, --targets-file PATH   File of newline-separated targets (batch mode)
   --help                    Show this message and exit.
 ```
 
@@ -105,20 +131,26 @@ Options:
 ## Project Structure
 
 ```
-reconx/
-├── cli.py                  # Click CLI — all commands
-├── core/
-│   ├── scanner.py          # Async TCP port scanner
-│   ├── dns_enum.py         # DNS record enumeration + zone transfer
-│   ├── subdomain.py        # Subdomain brute-force + passive sources
-│   ├── http_probe.py       # HTTP probing + tech fingerprinting
-│   ├── ssl_analyzer.py     # SSL/TLS certificate analysis
-│   └── whois_lookup.py     # WHOIS lookup
-├── utils/
-│   ├── display.py          # Rich terminal display
-│   └── report.py           # JSON + HTML report generator
-└── wordlists/
-    └── subdomains.txt      # Built-in subdomain list
+ReconX/
+├── Dockerfile
+├── pyproject.toml
+├── CHANGELOG.md
+├── CONTRIBUTING.md
+├── reconx/
+│   ├── cli.py                  # Click CLI — all commands
+│   ├── core/
+│   │   ├── scanner.py          # Async TCP port scanner
+│   │   ├── dns_enum.py         # DNS record enumeration + zone transfer
+│   │   ├── subdomain.py        # Subdomain brute-force + passive sources
+│   │   ├── http_probe.py       # HTTP probing + tech fingerprinting
+│   │   ├── ssl_analyzer.py     # SSL/TLS certificate analysis
+│   │   └── whois_lookup.py     # WHOIS lookup
+│   ├── utils/
+│   │   ├── display.py          # Rich terminal display
+│   │   └── report.py           # JSON + HTML report generator
+│   └── wordlists/
+│       └── subdomains.txt      # 5 000-entry built-in subdomain list
+└── tests/                      # pytest test suite
 ```
 
 ---
@@ -130,22 +162,20 @@ ReconX is built on:
 - **`asyncio`** — fully async core for high-performance concurrent scanning
 - **`aiohttp`** — async HTTP client for probing and passive recon sources
 - **`dnspython`** — DNS resolution and zone transfer attempts
-- **`rich`** — beautiful terminal output with tables, colours, and panels
-- **`click`** — composable CLI with subcommands
-- **Dataclasses** — typed result objects throughout
+- **`rich`** — beautiful terminal output with progress bars, tables, and colour
+- **`click`** — composable CLI with subcommands and shell completion
 
 ---
 
 ## Example Output
 
 ```
-Recon X  v1.0.0
-  All-in-one Reconnaissance & Pentesting Toolkit
-
   → Target: example.com
-  → Started: 2024-01-15 14:30:00 UTC
+  → Started: 2026-03-15 12:00:00 UTC
 
 ──────────────── 🔍  Port Scan ────────────────
+Scanning example.com ━━━━━━━━━━━━━━━━━━━━ 100%  3 open
+
  Port    Service    Banner
  22      SSH        SSH-2.0-OpenSSH_8.9p1 Ubuntu
  80      HTTP
@@ -157,9 +187,16 @@ Recon X  v1.0.0
  A       93.184.216.34
  MX      0 .
  NS      a.iana-servers.net.
- NS      b.iana-servers.net.
  TXT     v=spf1 -all
- ...
+```
+
+---
+
+## Development
+
+```bash
+pip install -e ".[dev]"
+pytest tests/ -v
 ```
 
 ---
@@ -167,7 +204,7 @@ Recon X  v1.0.0
 ## Requirements
 
 - Python 3.10+
-- See `requirements.txt`
+- See `pyproject.toml`
 
 ---
 
