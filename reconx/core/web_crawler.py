@@ -173,7 +173,6 @@ async def _fetch(
         async with session.get(
             url,
             timeout=aiohttp.ClientTimeout(total=timeout),
-            ssl=False,
             allow_redirects=True,
         ) as resp:
             ct = resp.headers.get("Content-Type", "")
@@ -181,7 +180,7 @@ async def _fetch(
             if "html" in ct or "javascript" in ct or "json" in ct:
                 body = await resp.text(errors="replace")
             return resp.status, body, ct, dict(resp.headers)
-    except Exception:
+    except (aiohttp.ClientError, asyncio.TimeoutError):
         return 0, "", "", {}
 
 
@@ -192,6 +191,7 @@ async def crawl(
     concurrency: int = 10,
     timeout: float = 10.0,
     port: int = 443,
+    verify_ssl: bool = True,
 ) -> CrawlResult:
     """
     Crawl a target website and extract endpoints, JS files, and API routes.
@@ -203,6 +203,8 @@ async def crawl(
         concurrency: Max concurrent HTTP requests.
         timeout: Per-request timeout in seconds.
         port: Starting port (443 = https, 80 = http).
+        verify_ssl: Whether to verify TLS certificates. Set False for targets
+                    with self-signed or internal certificates (--insecure).
 
     Returns:
         CrawlResult with all discovered endpoints, JS files, and subdomains.
@@ -227,7 +229,8 @@ async def crawl(
     all_subdomains: set[str] = set()
     queue: list[tuple[str, int]] = [(base_url, 0)]
 
-    connector = aiohttp.TCPConnector(ssl=False, limit=concurrency)
+    ssl_ctx: bool | None = None if verify_ssl else False
+    connector = aiohttp.TCPConnector(ssl=ssl_ctx, limit=concurrency)
     headers = {"User-Agent": "Mozilla/5.0 (compatible; ReconX/1.2)"}
 
     semaphore = asyncio.Semaphore(concurrency)

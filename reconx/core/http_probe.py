@@ -211,6 +211,7 @@ async def _probe_path(
     base_url: str,
     path: str,
     timeout: float,
+    verify_ssl: bool = True,
 ) -> Optional[InterestingPath]:
     url = base_url.rstrip("/") + path
     try:
@@ -218,13 +219,13 @@ async def _probe_path(
             url,
             timeout=aiohttp.ClientTimeout(total=timeout),
             allow_redirects=False,
-            ssl=False,
+            ssl=verify_ssl or None,
         ) as resp:
             if resp.status in (200, 301, 302, 307, 308, 401, 403):
                 body = ""
                 try:
                     body = await resp.text(errors="replace")
-                except Exception:
+                except (aiohttp.ClientError, UnicodeDecodeError):
                     pass
                 note = ""
                 if path == "/.git/HEAD" and resp.status == 200:
@@ -243,7 +244,7 @@ async def _probe_path(
                     content_length=len(body),
                     note=note,
                 )
-    except Exception:
+    except (aiohttp.ClientError, asyncio.TimeoutError):
         pass
     return None
 
@@ -253,6 +254,7 @@ async def probe(
     ports: Optional[list[int]] = None,
     probe_paths: bool = True,
     timeout: float = 10.0,
+    verify_ssl: bool = True,
 ) -> list[HTTPResult]:
     """
     HTTP probe a target across multiple ports/protocols.
@@ -262,6 +264,8 @@ async def probe(
         ports: Ports to probe. Defaults to [80, 443, 8080, 8443].
         probe_paths: Whether to check interesting paths.
         timeout: Request timeout in seconds.
+        verify_ssl: Whether to verify TLS certificates. Set False for targets
+                    with self-signed or internal certificates (--insecure).
 
     Returns:
         List of HTTPResult, one per responding endpoint.
@@ -275,7 +279,9 @@ async def probe(
         scheme = "https" if port in (443, 8443) else "http"
         urls.append(f"{scheme}://{target}:{port}")
 
-    connector = aiohttp.TCPConnector(ssl=False, limit=50)
+    # ssl=False disables verification; ssl=None uses the system CA bundle (verify=True behaviour).
+    ssl_ctx: bool | None = None if verify_ssl else False
+    connector = aiohttp.TCPConnector(ssl=ssl_ctx, limit=50)
     headers = {
         "User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
                       "(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
@@ -291,7 +297,6 @@ async def probe(
                     url,
                     timeout=aiohttp.ClientTimeout(total=timeout),
                     allow_redirects=True,
-                    ssl=False,
                 ) as resp:
                     result.status_code = resp.status
                     result.raw_headers = dict(resp.headers)
@@ -325,7 +330,7 @@ async def probe(
                     # Interesting path discovery
                     if probe_paths:
                         path_tasks = [
-                            _probe_path(session, url, path, timeout / 2)
+                            _probe_path(session, url, path, timeout / 2, verify_ssl)
                             for path in INTERESTING_PATHS
                         ]
                         path_results = await asyncio.gather(*path_tasks)
@@ -337,7 +342,9 @@ async def probe(
                 result.error = "Connection refused"
             except asyncio.TimeoutError:
                 result.error = "Timeout"
-            except Exception as exc:
+            except aiohttp.ClientSSLError as exc:
+                result.error = f"SSL error: {exc} (use --insecure to skip verification)"
+            except aiohttp.ClientError as exc:
                 result.error = str(exc)
 
             if not result.error:

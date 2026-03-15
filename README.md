@@ -14,7 +14,7 @@
 [![CI](https://github.com/mk017-hk/ReconX/actions/workflows/ci.yml/badge.svg)](https://github.com/mk017-hk/ReconX/actions/workflows/ci.yml)
 [![Python 3.10+](https://img.shields.io/badge/python-3.10%2B-blue)](https://www.python.org/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
-[![Version](https://img.shields.io/badge/version-1.3.0-green)](CHANGELOG.md)
+[![Version](https://img.shields.io/badge/version-1.3.1-green)](CHANGELOG.md)
 
 > **For authorised penetration testing and security research only.**
 > Always obtain written permission before scanning any system you do not own.
@@ -166,7 +166,7 @@ reconx udpscan example.com --ports 53,161,500
 reconx dnsenum example.com
 
 # Subdomain enumeration
-reconx subdomenum example.com --wordlist /path/to/wordlist.txt
+reconx subdomains example.com --wordlist /path/to/wordlist.txt
 
 # SSL/TLS analysis
 reconx sslcheck example.com --port 443
@@ -321,6 +321,9 @@ Options:
   --crawl-pages INT         Max pages to crawl [default: 50]
   --passive / --no-passive-sources  Passive source integrations
   -a, --all                 Enable all modules
+  --insecure                Disable TLS certificate verification for target scanning
+                            (use for internal targets or self-signed certificates;
+                             passive intelligence APIs always use verified TLS)
   -r, --report TEXT         Report base name (saves JSON + HTML)
   -o, --output-dir TEXT     Report output directory [default: reports]
   -q, --quiet               Suppress banner and progress output

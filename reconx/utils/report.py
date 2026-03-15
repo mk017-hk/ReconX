@@ -12,6 +12,7 @@ v1.2 upgrades:
 
 import json
 import datetime
+from datetime import timezone
 from dataclasses import asdict
 from pathlib import Path
 from typing import Any
@@ -41,7 +42,7 @@ def save_json(data: dict, output_path: str) -> str:
     path.parent.mkdir(parents=True, exist_ok=True)
     payload = {
         "reconx_version": __version__,
-        "generated_at": datetime.datetime.utcnow().isoformat() + "Z",
+        "generated_at": datetime.datetime.now(timezone.utc).isoformat() + "Z",
         **{k: _serialise(v) for k, v in data.items()},
     }
     path.write_text(json.dumps(payload, indent=2, default=str))
@@ -499,7 +500,7 @@ def generate_html(data: dict, output_path: str) -> str:
     path.parent.mkdir(parents=True, exist_ok=True)
 
     target = data.get("target", "Unknown")
-    generated_at = datetime.datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S UTC")
+    generated_at = datetime.datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
     sections_html = ""
     nav_links = ""
     cards: list[tuple[str, str, str, str]] = []   # (anchor, number, label, colour_class)

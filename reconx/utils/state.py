@@ -20,6 +20,7 @@ Usage:
 from __future__ import annotations
 
 import datetime
+from datetime import timezone
 import json
 from dataclasses import dataclass, field, asdict
 from pathlib import Path
@@ -58,12 +59,12 @@ class ScanState:
                 pass
         return cls(
             state_file=state_file,
-            created_at=datetime.datetime.utcnow().isoformat() + "Z",
+            created_at=datetime.datetime.now(timezone.utc).isoformat() + "Z",
         )
 
     def flush(self) -> None:
         """Write the state to disk."""
-        self.updated_at = datetime.datetime.utcnow().isoformat() + "Z"
+        self.updated_at = datetime.datetime.now(timezone.utc).isoformat() + "Z"
         path = Path(self.state_file)
         path.parent.mkdir(parents=True, exist_ok=True)
         payload = {
@@ -86,7 +87,7 @@ class ScanState:
 
     def save_result(self, target: str, collected: dict) -> None:
         """Store a completed scan result and mark target done."""
-        self.completed[target] = datetime.datetime.utcnow().isoformat() + "Z"
+        self.completed[target] = datetime.datetime.now(timezone.utc).isoformat() + "Z"
         # Serialise to JSON-safe dict (handles dataclasses)
         self.results[target] = _make_serialisable(collected)
         if target not in self.targets:
