@@ -12,6 +12,7 @@ Usage:
 
 import asyncio
 import datetime
+from datetime import timezone
 import sys
 from pathlib import Path
 from typing import Optional
@@ -129,6 +130,8 @@ def cli() -> None:
               help="Output report base name (no extension). Saves JSON + HTML.")
 @click.option("--output-dir", "-o", default=None,
               help="Directory to save reports [default: reports]")
+@click.option("--insecure", is_flag=True, default=False,
+              help="Disable TLS certificate verification for target scanning (self-signed certs)")
 @click.option("--quiet", "-q", is_flag=True, default=False,
               help="Suppress banner and progress output")
 # Batch
@@ -165,6 +168,7 @@ def scan(
     crawl_pages: Optional[int],
     run_passive: Optional[bool],
     run_all: bool,
+    insecure: bool,
     report_name: Optional[str],
     output_dir: Optional[str],
     quiet: bool,
@@ -191,6 +195,9 @@ def scan(
     if run_all:
         prof.dns = prof.http = prof.ssl = prof.whois = prof.subdomains = True
         prof.udp = prof.ip_intel = prof.crawl = prof.passive_sources = True
+
+    if insecure:
+        prof.verify_ssl = False
 
     if ports is not None:         prof.ports = ports
     if concurrency is not None:   prof.concurrency = concurrency
@@ -261,7 +268,7 @@ def scan(
         if len(targets) > 1:
             console.rule(f"[bold magenta]Target {i}/{len(targets)}: {tgt}[/bold magenta]")
         print_info(f"Target: [bold cyan]{tgt}[/bold cyan]")
-        print_info(f"Started: {datetime.datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S')} UTC\n")
+        print_info(f"Started: {datetime.datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S')} UTC\n")
 
         collected: dict = {"target": tgt}
         tgt_report = f"{report_name}_{tgt.replace('.', '_').replace(':', '_')}" \
@@ -274,6 +281,7 @@ def scan(
             ssl_port=ssl_port,
             report_name=tgt_report,
             collected=collected,
+            verify_ssl=prof.verify_ssl,
         ))
 
         if state and report_name:
@@ -292,6 +300,7 @@ async def _run_scan(
     ssl_port: int,
     report_name: Optional[str],
     collected: dict,
+    verify_ssl: bool = True,
 ) -> None:
     # ── Port Scan ────────────────────────────────────────────
     print_section("Port Scan", "🔍")
@@ -340,7 +349,8 @@ async def _run_scan(
         print_section("HTTP Probing & Technology Fingerprinting", "🕵️")
         http_port_list = [int(p.strip()) for p in prof.http_ports.split(",") if p.strip()]
         http_results = await http_probe.probe(
-            target, ports=http_port_list, probe_paths=prof.path_probe
+            target, ports=http_port_list, probe_paths=prof.path_probe,
+            verify_ssl=verify_ssl,
         )
         display_http_results(http_results)
         collected["http"] = http_results
@@ -361,6 +371,7 @@ async def _run_scan(
             target,
             max_depth=prof.crawl_depth,
             max_pages=prof.crawl_max_pages,
+            verify_ssl=verify_ssl,
         )
         display_crawl_result(crawl_result)
         collected["crawl"] = crawl_result
@@ -400,7 +411,7 @@ async def _run_scan(
     # ── Reports ──────────────────────────────────────────────
     if report_name:
         print_section("Generating Reports", "📄")
-        ts = datetime.datetime.utcnow().strftime("%Y%m%d_%H%M%S")
+        ts = datetime.datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
         base = f"{prof.output_dir}/{report_name}_{ts}"
 
         if "json" in prof.report_formats:
@@ -413,7 +424,7 @@ async def _run_scan(
 
     console.print(
         f"\n  [bold green]Scan complete.[/bold green]  "
-        f"[dim]{datetime.datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S')} UTC[/dim]\n"
+        f"[dim]{datetime.datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S')} UTC[/dim]\n"
     )
 
 
@@ -454,14 +465,25 @@ def udpscan(target: str, ports: str, timeout: float) -> None:
     display_udp_result(result)
 
 
-@cli.command()
+@cli.command("subdomains")
+@click.argument("target")
+@click.option("--passive/--no-passive", default=True, show_default=True)
+@click.option("--wordlist", "-w", default=None)
+def subdomains_cmd(target: str, passive: bool, wordlist: Optional[str]) -> None:
+    """Subdomain enumeration only."""
+    print_banner(__version__)
+    print_section("Subdomain Enumeration", "🌐")
+    result = asyncio.run(subdomain.enumerate(target, wordlist_path=wordlist, use_passive=passive))
+    display_subdomain_result(result)
+
+
+# Backward-compat alias — deprecated name kept for existing scripts
+@cli.command("subdomenum", hidden=True, deprecated=True)
 @click.argument("target")
 @click.option("--passive/--no-passive", default=True, show_default=True)
 @click.option("--wordlist", "-w", default=None)
 def subdomenum(target: str, passive: bool, wordlist: Optional[str]) -> None:
-    """Subdomain enumeration only."""
-    print_banner(__version__)
-    print_section("Subdomain Enumeration", "🌐")
+    """Subdomain enumeration (deprecated alias — use 'subdomains' instead)."""
     result = asyncio.run(subdomain.enumerate(target, wordlist_path=wordlist, use_passive=passive))
     display_subdomain_result(result)
 

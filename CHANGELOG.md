@@ -7,6 +7,25 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ---
 
+## [1.3.1] — 2026-03-15
+
+### Security
+- **SSL verification restored** — passive intelligence APIs (Shodan, Censys, VirusTotal, SecurityTrails, AbuseIPDB, crt.sh, OTX) now use verified TLS connections; removed `ssl=False` from all provider HTTP clients and the shared `TCPConnector`
+- **`--insecure` flag added** — `reconx scan --insecure` disables certificate verification for *target* scanning only (HTTP probing and web crawling); useful for internal targets with self-signed certificates
+- **`verify_ssl: bool = True`** added to `ScanProfile`; `http_probe.probe()` and `web_crawler.crawl()` accept and respect this parameter
+
+### Changed
+- `subdomenum` command renamed to `subdomains` (`reconx subdomains example.com`); the old name is retained as a hidden deprecated alias for backward compatibility
+- `datetime.utcnow()` (deprecated since Python 3.12) replaced with `datetime.now(timezone.utc)` in `state.py`, `cli.py`, and `report.py`
+- `except Exception` blocks in `passive_sources.py` narrowed to `(aiohttp.ClientError, asyncio.TimeoutError, ValueError)` with `log.warning()` instead of silent `log.debug()`
+- `_probe_path()` in `http_probe.py` now catches `(aiohttp.ClientError, asyncio.TimeoutError)` instead of bare `except Exception`; main loop narrows to `aiohttp.ClientSSLError` (reported as actionable SSL error with `--insecure` hint) and `aiohttp.ClientError`
+- `_fetch()` in `web_crawler.py` narrows to `(aiohttp.ClientError, asyncio.TimeoutError)`
+
+### Fixed
+- `aiohttp.ClientSSLError` on target scanning now surfaces a helpful message: `SSL error: ... (use --insecure to skip verification)` rather than a generic exception string
+
+---
+
 ## [1.3.0] — 2026-03-15
 
 ### Added

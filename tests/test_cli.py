@@ -54,7 +54,12 @@ class TestCLIBasics:
         result = runner.invoke(cli, ["dnsenum", "--help"])
         assert result.exit_code == 0
 
-    def test_subdomenum_help(self, runner):
+    def test_subdomains_help(self, runner):
+        result = runner.invoke(cli, ["subdomains", "--help"])
+        assert result.exit_code == 0
+
+    def test_subdomenum_help_backward_compat(self, runner):
+        """subdomenum is a deprecated alias — must still be invocable."""
         result = runner.invoke(cli, ["subdomenum", "--help"])
         assert result.exit_code == 0
 
@@ -98,3 +103,36 @@ class TestProfileOption:
         result = runner.invoke(cli, ["scan", "--help"])
         assert "--profile" in result.output
         assert "quick" in result.output or "full" in result.output or "web" in result.output
+
+    def test_insecure_flag_in_scan_help(self, runner):
+        result = runner.invoke(cli, ["scan", "--help"])
+        assert "--insecure" in result.output
+
+    def test_scan_standard_profile_insecure_sets_verify_ssl_false(self, runner, monkeypatch):
+        """--insecure should set verify_ssl=False on the profile before running."""
+        captured = {}
+
+        async def fake_run_scan(**kwargs):
+            captured.update(kwargs)
+
+        monkeypatch.setattr("reconx.cli._run_scan", fake_run_scan)
+        result = runner.invoke(cli, [
+            "scan", "example.com",
+            "--no-dns", "--no-http", "--no-ssl", "--no-whois",
+            "--insecure",
+        ])
+        assert captured.get("verify_ssl") is False
+
+    def test_scan_default_verify_ssl_true(self, runner, monkeypatch):
+        """Without --insecure, verify_ssl must be True."""
+        captured = {}
+
+        async def fake_run_scan(**kwargs):
+            captured.update(kwargs)
+
+        monkeypatch.setattr("reconx.cli._run_scan", fake_run_scan)
+        result = runner.invoke(cli, [
+            "scan", "example.com",
+            "--no-dns", "--no-http", "--no-ssl", "--no-whois",
+        ])
+        assert captured.get("verify_ssl") is True

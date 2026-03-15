@@ -72,7 +72,7 @@ async def _crtsh_subdomains(domain: str, session: "aiohttp.ClientSession") -> li
     """
     try:
         url = f"https://crt.sh/?q=%25.{domain}&output=json"
-        async with session.get(url, timeout=aiohttp.ClientTimeout(total=20), ssl=False) as resp:
+        async with session.get(url, timeout=aiohttp.ClientTimeout(total=20)) as resp:
             if resp.status == 200:
                 data = await resp.json(content_type=None)
                 names: set[str] = set()
@@ -83,8 +83,8 @@ async def _crtsh_subdomains(domain: str, session: "aiohttp.ClientSession") -> li
                             names.add(name)
                 log.debug("crt.sh: found %d subdomains for %s", len(names), domain)
                 return sorted(names)
-    except Exception as exc:
-        log.debug("crt.sh lookup failed for %s: %s", domain, exc)
+    except (aiohttp.ClientError, asyncio.TimeoutError, ValueError) as exc:
+        log.warning("crt.sh lookup failed for %s: %s", domain, exc)
     return []
 
 
@@ -98,7 +98,7 @@ async def _shodan_lookup(
     """Query Shodan host info for an IP/domain."""
     try:
         url = f"https://api.shodan.io/shodan/host/{target}?key={api_key}"
-        async with session.get(url, timeout=aiohttp.ClientTimeout(total=15), ssl=False) as resp:
+        async with session.get(url, timeout=aiohttp.ClientTimeout(total=15)) as resp:
             if resp.status == 200:
                 data = await resp.json(content_type=None)
                 return PassiveHost(
@@ -110,8 +110,8 @@ async def _shodan_lookup(
                 )
             if resp.status == 404:
                 return None
-    except Exception as exc:
-        log.debug("Shodan lookup failed: %s", exc)
+    except (aiohttp.ClientError, asyncio.TimeoutError, ValueError) as exc:
+        log.warning("Shodan lookup failed: %s", exc)
     return None
 
 
@@ -121,13 +121,13 @@ async def _shodan_dns(
     """Shodan DNS domain search for subdomains."""
     try:
         url = f"https://api.shodan.io/dns/domain/{domain}?key={api_key}"
-        async with session.get(url, timeout=aiohttp.ClientTimeout(total=15), ssl=False) as resp:
+        async with session.get(url, timeout=aiohttp.ClientTimeout(total=15)) as resp:
             if resp.status == 200:
                 data = await resp.json(content_type=None)
                 subs = data.get("subdomains", [])
                 return [f"{s}.{domain}" for s in subs]
-    except Exception as exc:
-        log.debug("Shodan DNS lookup failed: %s", exc)
+    except (aiohttp.ClientError, asyncio.TimeoutError, ValueError) as exc:
+        log.warning("Shodan DNS lookup failed: %s", exc)
     return []
 
 
@@ -144,7 +144,7 @@ async def _censys_lookup(
         auth = base64.b64encode(f"{api_id}:{api_secret}".encode()).decode()
         headers = {"Authorization": f"Basic {auth}"}
         url = f"https://search.censys.io/api/v2/hosts/{target}"
-        async with session.get(url, headers=headers, timeout=aiohttp.ClientTimeout(total=15), ssl=False) as resp:
+        async with session.get(url, headers=headers, timeout=aiohttp.ClientTimeout(total=15)) as resp:
             if resp.status == 200:
                 data = await resp.json(content_type=None)
                 result_data = data.get("result", {})
@@ -152,8 +152,8 @@ async def _censys_lookup(
                 ports = [s.get("port") for s in services if s.get("port")]
                 hostnames = result_data.get("dns", {}).get("reverse_dns", {}).get("names", [])
                 return PassiveHost(ip=target, hostnames=hostnames, ports=ports, source="censys")
-    except Exception as exc:
-        log.debug("Censys lookup failed: %s", exc)
+    except (aiohttp.ClientError, asyncio.TimeoutError, ValueError) as exc:
+        log.warning("Censys lookup failed: %s", exc)
     return None
 
 
@@ -168,12 +168,12 @@ async def _securitytrails_subdomains(
     try:
         url = f"https://api.securitytrails.com/v1/domain/{domain}/subdomains"
         headers = {"apikey": api_key, "Content-Type": "application/json"}
-        async with session.get(url, headers=headers, timeout=aiohttp.ClientTimeout(total=15), ssl=False) as resp:
+        async with session.get(url, headers=headers, timeout=aiohttp.ClientTimeout(total=15)) as resp:
             if resp.status == 200:
                 data = await resp.json(content_type=None)
                 return [f"{s}.{domain}" for s in data.get("subdomains", [])]
-    except Exception as exc:
-        log.debug("SecurityTrails subdomains failed: %s", exc)
+    except (aiohttp.ClientError, asyncio.TimeoutError, ValueError) as exc:
+        log.warning("SecurityTrails subdomains failed: %s", exc)
     return []
 
 
@@ -184,7 +184,7 @@ async def _securitytrails_emails(
     try:
         url = f"https://api.securitytrails.com/v1/domain/{domain}/whois"
         headers = {"apikey": api_key}
-        async with session.get(url, headers=headers, timeout=aiohttp.ClientTimeout(total=15), ssl=False) as resp:
+        async with session.get(url, headers=headers, timeout=aiohttp.ClientTimeout(total=15)) as resp:
             if resp.status == 200:
                 data = await resp.json(content_type=None)
                 emails = [
@@ -193,8 +193,8 @@ async def _securitytrails_emails(
                     if "@" in c.get("email", "")
                 ]
                 return list(set(emails))
-    except Exception as exc:
-        log.debug("SecurityTrails emails failed: %s", exc)
+    except (aiohttp.ClientError, asyncio.TimeoutError, ValueError) as exc:
+        log.warning("SecurityTrails emails failed: %s", exc)
     return []
 
 
@@ -213,7 +213,7 @@ async def _virustotal_lookup(
     try:
         headers = {"x-apikey": api_key}
         endpoint = f"https://www.virustotal.com/api/v3/domains/{target}"
-        async with session.get(endpoint, headers=headers, timeout=aiohttp.ClientTimeout(total=15), ssl=False) as resp:
+        async with session.get(endpoint, headers=headers, timeout=aiohttp.ClientTimeout(total=15)) as resp:
             if resp.status == 200:
                 data = await resp.json(content_type=None)
                 stats = data.get("data", {}).get("attributes", {}).get("last_analysis_stats", {})
@@ -222,14 +222,14 @@ async def _virustotal_lookup(
 
                 subs: list[str] = []
                 subs_url = f"https://www.virustotal.com/api/v3/domains/{target}/subdomains"
-                async with session.get(subs_url, headers=headers, timeout=aiohttp.ClientTimeout(total=10), ssl=False) as sr:
+                async with session.get(subs_url, headers=headers, timeout=aiohttp.ClientTimeout(total=10)) as sr:
                     if sr.status == 200:
                         sd = await sr.json(content_type=None)
                         subs = [item.get("id", "") for item in sd.get("data", []) if item.get("id")]
 
                 return is_malicious, malicious, subs
-    except Exception as exc:
-        log.debug("VirusTotal lookup failed: %s", exc)
+    except (aiohttp.ClientError, asyncio.TimeoutError, ValueError) as exc:
+        log.warning("VirusTotal lookup failed: %s", exc)
     return None, 0, []
 
 
@@ -247,13 +247,13 @@ async def _abuseipdb_check(
         async with session.get(
             "https://api.abuseipdb.com/api/v2/check",
             headers=headers, params=params,
-            timeout=aiohttp.ClientTimeout(total=10), ssl=False,
+            timeout=aiohttp.ClientTimeout(total=10),
         ) as resp:
             if resp.status == 200:
                 data = await resp.json(content_type=None)
                 return data.get("data", {}).get("abuseConfidenceScore")
-    except Exception as exc:
-        log.debug("AbuseIPDB check failed: %s", exc)
+    except (aiohttp.ClientError, asyncio.TimeoutError, ValueError) as exc:
+        log.warning("AbuseIPDB check failed: %s", exc)
     return None
 
 
@@ -269,7 +269,7 @@ async def _otx_lookup(target: str, session: "aiohttp.ClientSession") -> list[str
     """
     try:
         url = f"https://otx.alienvault.com/api/v1/indicators/domain/{target}/passive_dns"
-        async with session.get(url, timeout=aiohttp.ClientTimeout(total=10), ssl=False) as resp:
+        async with session.get(url, timeout=aiohttp.ClientTimeout(total=10)) as resp:
             if resp.status == 200:
                 data = await resp.json(content_type=None)
                 hosts = {
@@ -277,8 +277,8 @@ async def _otx_lookup(target: str, session: "aiohttp.ClientSession") -> list[str
                     if r.get("hostname")
                 }
                 return [h for h in hosts if target in h and h != target]
-    except Exception as exc:
-        log.debug("OTX lookup failed: %s", exc)
+    except (aiohttp.ClientError, asyncio.TimeoutError, ValueError) as exc:
+        log.warning("OTX lookup failed: %s", exc)
     return []
 
 
@@ -317,7 +317,9 @@ async def gather(
         result.errors.append("aiohttp not installed — passive sources unavailable")
         return result
 
-    connector = aiohttp.TCPConnector(ssl=False)
+    # Passive intelligence APIs are legitimate services with valid TLS certificates.
+    # SSL verification is always enabled here; ssl=None uses the system CA bundle.
+    connector = aiohttp.TCPConnector()
     async with aiohttp.ClientSession(connector=connector) as session:
         tasks: dict[str, object] = {}
 

@@ -64,6 +64,9 @@ class ScanProfile:
     output_dir: str = "reports"
     report_formats: list[str] = field(default_factory=lambda: ["json", "html"])
 
+    # SSL / TLS verification
+    verify_ssl: bool = True   # False → skip cert verification (--insecure)
+
     # API keys (optional integrations)
     shodan_key: str = ""
     censys_id: str = ""

@@ -69,3 +69,32 @@ class TestScanState:
         sf = str(tmp_path / "test.state.json")
         state = ScanState.load(sf)
         assert state.get_result("nonexistent.com") is None
+
+    def test_created_at_is_utc_isoformat(self, tmp_path):
+        """Timestamps must be timezone-aware ISO strings ending with Z or +00:00."""
+        sf = str(tmp_path / "test.state.json")
+        state = ScanState.load(sf)
+        ts = state.created_at
+        assert ts, "created_at must not be empty"
+        # Accept both 'Z' suffix and '+00:00' offset
+        assert ts.endswith("Z") or ts.endswith("+00:00"), (
+            f"Timestamp '{ts}' must end with Z or +00:00"
+        )
+
+    def test_completed_timestamp_is_utc(self, tmp_path):
+        """save_result() must store a UTC-aware timestamp."""
+        sf = str(tmp_path / "test.state.json")
+        state = ScanState.load(sf)
+        state.save_result("a.com", {})
+        ts = state.completed["a.com"]
+        assert ts.endswith("Z") or ts.endswith("+00:00"), (
+            f"Completed timestamp '{ts}' must be UTC"
+        )
+
+    def test_corrupt_state_file_loads_fresh(self, tmp_path):
+        """Corrupt JSON must not raise — a fresh state is returned instead."""
+        sf = str(tmp_path / "corrupt.state.json")
+        Path(sf).write_text("{invalid json}")
+        state = ScanState.load(sf)
+        assert state.targets == []
+        assert state.completed == {}
