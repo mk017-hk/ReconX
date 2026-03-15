@@ -19,6 +19,8 @@ try:
 except ImportError:
     HAS_AIOHTTP = False
 
+from rich.progress import Progress, SpinnerColumn, BarColumn, TaskProgressColumn, TextColumn
+
 try:
     import dns.asyncresolver
     import dns.exception
@@ -72,12 +74,27 @@ async def _bruteforce_chunk(
     semaphore: asyncio.Semaphore,
     results: list[Subdomain],
 ) -> None:
-    for word in words:
-        async with semaphore:
-            hostname = f"{word}.{domain}"
-            ips = await _resolve(hostname)
-            if ips:
-                results.append(Subdomain(name=hostname, ips=ips, source="bruteforce"))
+    with Progress(
+        SpinnerColumn(),
+        TextColumn("[bold cyan]{task.description}"),
+        BarColumn(),
+        TaskProgressColumn(),
+        TextColumn("[dim]{task.fields[found]} found"),
+        transient=True,
+    ) as progress:
+        task_id = progress.add_task(
+            f"Brute-forcing {domain}", total=len(words), found=0
+        )
+
+        async def _check(word: str) -> None:
+            async with semaphore:
+                hostname = f"{word}.{domain}"
+                ips = await _resolve(hostname)
+                if ips:
+                    results.append(Subdomain(name=hostname, ips=ips, source="bruteforce"))
+                progress.update(task_id, advance=1, found=len(results))
+
+        await asyncio.gather(*[_check(w) for w in words])
 
 
 async def _crtsh_lookup(domain: str, timeout: int = 15) -> list[str]:
