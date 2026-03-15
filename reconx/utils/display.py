@@ -77,13 +77,15 @@ def display_scan_result(result) -> None:
     )
     table.add_column("Port", style="bold green", width=8)
     table.add_column("Service", width=14)
+    table.add_column("Version", width=28, style="cyan")
     table.add_column("Banner", style="dim")
 
     for p in result.open_ports:
         table.add_row(
             str(p.port),
             p.service,
-            p.banner[:80] if p.banner else "",
+            p.version[:28] if p.version else "",
+            p.banner[:60] if p.banner else "",
         )
 
     if not result.open_ports:
@@ -246,3 +248,165 @@ def display_whois_result(result) -> None:
     table.add_row("Emails", "\n".join(result.emails) or "—")
 
     console.print(table)
+
+
+def display_udp_result(result) -> None:
+    if result.error:
+        print_error(f"UDP scan failed: {result.error}")
+        return
+
+    table = Table(
+        title=f"UDP Ports — {result.host} ({result.ip})",
+        box=box.SIMPLE_HEAD,
+        header_style="bold cyan",
+        border_style="dim",
+    )
+    table.add_column("Port", style="bold yellow", width=8)
+    table.add_column("State", width=14)
+    table.add_column("Service", width=14)
+    table.add_column("Banner", style="dim")
+
+    for p in result.open_ports:
+        state_style = "green" if p.state == "open" else "yellow"
+        table.add_row(
+            str(p.port),
+            f"[{state_style}]{p.state}[/{state_style}]",
+            p.service,
+            p.banner[:60] if p.banner else "",
+        )
+
+    if not result.open_ports:
+        console.print("  [dim]No UDP responses received.[/dim]")
+    else:
+        console.print(table)
+        console.print(
+            f"  [dim]Probed {result.total_scanned} UDP ports · "
+            f"Found [bold yellow]{len(result.open_ports)}[/bold yellow] open/filtered[/dim]"
+        )
+
+
+def display_crawl_result(result) -> None:
+    if result.error:
+        print_error(f"Crawl failed: {result.error}")
+        return
+
+    endpoints = [e for e in result.endpoints if e.status_code in range(200, 500)]
+    if endpoints:
+        table = Table(box=box.SIMPLE_HEAD, header_style="bold cyan", border_style="dim")
+        table.add_column("URL", max_width=60)
+        table.add_column("Status", width=8)
+        table.add_column("Source", width=12, style="dim")
+        table.add_column("Note", style="bold red")
+
+        for ep in sorted(endpoints, key=lambda e: (e.status_code, e.url)):
+            sc = ep.status_code
+            sc_style = "green" if 200 <= sc < 300 else "yellow" if sc < 400 else "red"
+            table.add_row(
+                ep.url[:60],
+                f"[{sc_style}]{sc}[/{sc_style}]",
+                ep.source,
+                ep.note or "",
+            )
+        console.print(table)
+
+    if result.js_files:
+        console.print(f"\n  [bold]JS files analysed:[/bold] {len(result.js_files)}")
+        all_ep: set[str] = set()
+        for js in result.js_files:
+            all_ep.update(js.endpoints_found)
+        if all_ep:
+            console.print(f"  [dim]API routes found in JS:[/dim] [cyan]{len(all_ep)}[/cyan]")
+            for ep in sorted(all_ep)[:20]:
+                console.print(f"    [dim]{ep}[/dim]")
+
+    if result.discovered_subdomains:
+        console.print(f"\n  [bold]Subdomains in JS:[/bold]")
+        for s in result.discovered_subdomains[:15]:
+            console.print(f"    [cyan]{s}[/cyan]")
+
+    console.print(
+        f"\n  [dim]Pages crawled: {result.total_pages_crawled} · "
+        f"Endpoints: {len(result.endpoints)} · "
+        f"JS files: {len(result.js_files)}[/dim]"
+    )
+
+
+def display_ip_intel_result(result) -> None:
+    if result.error:
+        print_error(f"IP intel failed: {result.error}")
+        return
+
+    table = Table(box=box.SIMPLE_HEAD, header_style="bold cyan", border_style="dim")
+    table.add_column("Field", style="bold", width=22)
+    table.add_column("Value")
+
+    table.add_row("IP", result.ip)
+    if result.ptr_records:
+        table.add_row("PTR", "\n".join(result.ptr_records))
+    if result.asn:
+        table.add_row("ASN", f"{result.asn.asn} {result.asn.asn_name}")
+        table.add_row("Network", result.asn.cidr or "—")
+        table.add_row("Org", result.asn.org or result.asn.asn_description or "—")
+        if result.asn.cloud_provider:
+            table.add_row("Cloud", f"[bold cyan]{result.asn.cloud_provider}[/bold cyan]")
+    if result.geo:
+        table.add_row("Location", f"{result.geo.city}, {result.geo.country} ({result.geo.country_code})")
+        table.add_row("ISP", result.geo.isp or "—")
+
+    console.print(table)
+
+    if result.is_private:
+        print_warning("Target resolves to a private/RFC1918 address")
+
+
+def display_passive_result(result) -> None:
+    if not result.hosts and not result.subdomains and not result.findings:
+        console.print("  [dim]No passive source data found.[/dim]")
+        return
+
+    if result.findings:
+        console.print("\n  [bold]Passive Intelligence:[/bold]")
+        for f in result.findings:
+            level = "critical" if "malicious" in f.lower() or "abuse" in f.lower() else "info"
+            print_finding(f, level)
+
+    if result.subdomains:
+        console.print(f"\n  [dim]Subdomains from passive sources:[/dim] [cyan]{len(result.subdomains)}[/cyan]")
+        for s in result.subdomains[:20]:
+            console.print(f"    [dim]{s}[/dim]")
+
+    if result.emails:
+        console.print(f"\n  [dim]Emails discovered:[/dim] {', '.join(result.emails[:10])}")
+
+
+def display_severity_summary(findings) -> None:
+    from reconx.core.severity import Severity, SEVERITY_ORDER
+    if not findings:
+        return
+
+    counts: dict[str, int] = {}
+    for f in findings:
+        sev = f.severity.value if hasattr(f.severity, "value") else str(f.severity)
+        counts[sev] = counts.get(sev, 0) + 1
+
+    styles = {
+        "CRITICAL": "bold red",
+        "HIGH": "bold orange3",
+        "MEDIUM": "bold yellow",
+        "LOW": "dim green",
+        "INFO": "dim",
+    }
+
+    console.print("\n  [bold]Findings by severity:[/bold]")
+    for sev in ["CRITICAL", "HIGH", "MEDIUM", "LOW", "INFO"]:
+        count = counts.get(sev, 0)
+        if count:
+            style = styles.get(sev, "")
+            console.print(f"    [{style}]{sev:10}[/{style}]  {count}")
+
+    console.print()
+    for f in findings:
+        sev = f.severity.value if hasattr(f.severity, "value") else str(f.severity)
+        style = styles.get(sev, "dim")
+        mod = f"[dim][{f.module}][/dim] " if f.module else ""
+        console.print(f"  [{style}]{sev:10}[/{style}]  {mod}{f.title}")

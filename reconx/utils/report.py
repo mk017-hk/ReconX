@@ -1,5 +1,13 @@
 """
 Report generation — JSON and self-contained HTML reports.
+
+v1.2 upgrades:
+  - Per-finding severity badges (CRITICAL / HIGH / MEDIUM / LOW / INFO)
+  - Summary cards include severity breakdown
+  - Collapsible sections via <details>
+  - Inline SVG mini-charts (open ports by service, severity pie)
+  - UDP, IP Intel, Web Crawl, Passive Sources sections
+  - Severity-coloured finding rows
 """
 
 import json
@@ -11,8 +19,11 @@ from typing import Any
 from reconx import __version__
 
 
+# ─────────────────────────────────────────────────────────────
+# Serialisation
+# ─────────────────────────────────────────────────────────────
+
 def _serialise(obj: Any) -> Any:
-    """Recursively make objects JSON-serialisable."""
     if hasattr(obj, "__dataclass_fields__"):
         return {k: _serialise(v) for k, v in asdict(obj).items()}
     if isinstance(obj, list):
@@ -35,8 +46,220 @@ def save_json(data: dict, output_path: str) -> str:
 
 
 # ─────────────────────────────────────────────────────────────
-# HTML report template
+# HTML helpers
 # ─────────────────────────────────────────────────────────────
+
+_SEV_COLOURS = {
+    "CRITICAL": ("#f85149", "#3d1c1c"),
+    "HIGH":     ("#db6d28", "#3d2000"),
+    "MEDIUM":   ("#d29922", "#332d00"),
+    "LOW":      ("#3fb950", "#1b4332"),
+    "INFO":     ("#58a6ff", "#1c2d3d"),
+}
+
+
+def _badge(text: str, colour: str = "blue") -> str:
+    return f'<span class="badge badge-{colour}">{text}</span>'
+
+
+def _sev_badge(severity: str) -> str:
+    colour_map = {
+        "CRITICAL": "red",
+        "HIGH": "orange",
+        "MEDIUM": "yellow",
+        "LOW": "green",
+        "INFO": "blue",
+    }
+    return _badge(severity, colour_map.get(severity.upper(), "blue"))
+
+
+def _section(title: str, icon: str, content: str, anchor: str = "",
+             collapsible: bool = False, open_by_default: bool = True) -> str:
+    anchor_attr = f'id="{anchor}"' if anchor else ""
+    inner = f"""
+<div class="section" {anchor_attr}>
+  <div class="section-header" onclick="toggleSection(this)">
+    <span>{icon}</span>
+    <span class="section-title">{title}</span>
+    <span class="toggle-icon" style="margin-left:auto">▼</span>
+  </div>
+  <div class="section-body" {'style="display:none"' if collapsible and not open_by_default else ''}>
+    {content}
+  </div>
+</div>"""
+    return inner
+
+
+def _findings_html(findings: list, module: str = "") -> str:
+    """Render a list of findings. Accepts str or Finding objects."""
+    if not findings:
+        return '<div class="empty">No findings.</div>'
+    html = ""
+    for f in findings:
+        if hasattr(f, "severity") and hasattr(f, "title"):
+            sev = f.severity.value if hasattr(f.severity, "value") else str(f.severity)
+            title = f.title
+            detail = getattr(f, "detail", "")
+            mod = getattr(f, "module", module)
+        else:
+            title = str(f)
+            detail = ""
+            sev = _classify_severity(title)
+            mod = module
+
+        fg, bg = _SEV_COLOURS.get(sev, ("#c9d1d9", "#161b22"))
+        mod_tag = f'<span style="font-size:10px;opacity:0.6;margin-left:6px">[{mod}]</span>' if mod else ""
+        detail_html = f'<div style="font-size:12px;opacity:0.7;margin-top:2px">{detail}</div>' if detail else ""
+        html += f"""<div class="finding-row" style="border-left-color:{fg};background:{bg}">
+  <div style="display:flex;align-items:center;gap:8px">
+    {_sev_badge(sev)}{mod_tag}
+    <span>{title}</span>
+  </div>
+  {detail_html}
+</div>\n"""
+    return html
+
+
+def _classify_severity(text: str) -> str:
+    """Quick-classify a string finding for HTML rendering."""
+    t = text.upper()
+    if any(k in t for k in ("ZONE TRANSFER", "GIT REPO", "ENV FILE", "EXPIRED", "ACTUATOR")):
+        return "CRITICAL"
+    if any(k in t for k in ("DEPRECATED", "WEAK CIPHER", "SELF-SIGNED", "SSLv", "TLS 1.0", "TLS 1.1", "SNMP", "TELNET", "EXPOSED")):
+        return "HIGH"
+    if any(k in t for k in ("MISSING", "CSP", "HSTS", "SPF", "DMARC", "CLICKJACKING")):
+        return "MEDIUM"
+    if any(k in t for k in ("REFERRER", "PERMISSION", "COOKIE", "EXPIR", "PTR", "ASN")):
+        return "LOW"
+    return "INFO"
+
+
+# ─────────────────────────────────────────────────────────────
+# Mini SVG charts
+# ─────────────────────────────────────────────────────────────
+
+def _severity_chart(counts: dict[str, int]) -> str:
+    """Render a tiny horizontal bar chart for severity counts."""
+    total = sum(counts.values()) or 1
+    colours = {"CRITICAL": "#f85149", "HIGH": "#db6d28", "MEDIUM": "#d29922", "LOW": "#3fb950", "INFO": "#58a6ff"}
+    bars = ""
+    for sev, count in counts.items():
+        if not count:
+            continue
+        pct = count / total * 100
+        col = colours.get(sev, "#8b949e")
+        bars += f'<div style="display:flex;align-items:center;gap:8px;margin:3px 0">'
+        bars += f'<span style="width:60px;font-size:11px;color:{col}">{sev}</span>'
+        bars += f'<div style="background:{col};height:10px;width:{pct:.1f}%;border-radius:3px;min-width:4px"></div>'
+        bars += f'<span style="font-size:11px;color:#8b949e">{count}</span></div>'
+    return bars
+
+
+def _service_chart(open_ports: list) -> str:
+    """Bar chart of open ports by service."""
+    counts: dict[str, int] = {}
+    for p in open_ports:
+        svc = p.get("service", "Unknown") if isinstance(p, dict) else getattr(p, "service", "Unknown")
+        counts[svc] = counts.get(svc, 0) + 1
+
+    if not counts:
+        return ""
+
+    max_count = max(counts.values()) or 1
+    bars = ""
+    for svc, count in sorted(counts.items(), key=lambda x: -x[1])[:10]:
+        pct = count / max_count * 100
+        bars += f'<div style="display:flex;align-items:center;gap:8px;margin:3px 0">'
+        bars += f'<span style="width:100px;font-size:11px;color:#8b949e;overflow:hidden;text-overflow:ellipsis">{svc}</span>'
+        bars += f'<div style="background:#58a6ff;height:10px;width:{pct:.1f}%;border-radius:3px;min-width:4px"></div>'
+        bars += f'<span style="font-size:11px;color:#8b949e">{count}</span></div>'
+    return bars
+
+
+# ─────────────────────────────────────────────────────────────
+# CSS + JS
+# ─────────────────────────────────────────────────────────────
+
+_STYLE = """
+  :root {
+    --bg: #0d1117; --surface: #161b22; --border: #30363d;
+    --accent: #58a6ff; --green: #3fb950; --red: #f85149;
+    --yellow: #d29922; --orange: #db6d28; --text: #c9d1d9; --muted: #8b949e;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body { background: var(--bg); color: var(--text); font-family: 'Segoe UI', system-ui, sans-serif; font-size: 14px; line-height: 1.6; }
+  a { color: var(--accent); text-decoration: none; }
+  .container { max-width: 1200px; margin: 0 auto; padding: 24px; }
+  /* Header */
+  .header { background: var(--surface); border: 1px solid var(--border); border-radius: 8px; padding: 24px; margin-bottom: 24px; display: flex; align-items: center; justify-content: space-between; }
+  .logo { font-size: 28px; font-weight: 700; color: var(--accent); letter-spacing: 2px; }
+  .logo span { color: var(--red); }
+  .meta { text-align: right; color: var(--muted); font-size: 12px; }
+  .target-badge { background: #21262d; border: 1px solid var(--border); border-radius: 20px; padding: 6px 16px; font-family: monospace; color: var(--accent); margin-top: 8px; display: inline-block; }
+  /* Summary cards */
+  .cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(160px, 1fr)); gap: 16px; margin-bottom: 24px; }
+  .card { background: var(--surface); border: 1px solid var(--border); border-radius: 8px; padding: 16px; text-align: center; }
+  .card-number { font-size: 32px; font-weight: 700; color: var(--accent); }
+  .card-number.critical { color: var(--red); }
+  .card-number.high { color: var(--orange); }
+  .card-number.medium { color: var(--yellow); }
+  .card-label { color: var(--muted); font-size: 11px; margin-top: 4px; text-transform: uppercase; letter-spacing: 1px; }
+  /* Section */
+  .section { background: var(--surface); border: 1px solid var(--border); border-radius: 8px; margin-bottom: 16px; overflow: hidden; }
+  .section-header { padding: 14px 20px; border-bottom: 1px solid var(--border); display: flex; align-items: center; gap: 10px; background: #1c2128; cursor: pointer; user-select: none; }
+  .section-header:hover { background: #21262d; }
+  .section-title { font-size: 15px; font-weight: 600; }
+  .section-body { padding: 16px 20px; }
+  .toggle-icon { color: var(--muted); font-size: 12px; transition: transform .2s; }
+  .section-header.collapsed .toggle-icon { transform: rotate(-90deg); }
+  /* Table */
+  table { width: 100%; border-collapse: collapse; }
+  th { text-align: left; color: var(--muted); font-size: 11px; text-transform: uppercase; letter-spacing: 1px; padding: 8px 12px; border-bottom: 1px solid var(--border); }
+  td { padding: 8px 12px; border-bottom: 1px solid #21262d; font-family: monospace; font-size: 13px; vertical-align: top; }
+  tr:last-child td { border-bottom: none; }
+  tr:hover td { background: #1c2128; }
+  /* Badges */
+  .badge { display: inline-block; padding: 2px 8px; border-radius: 12px; font-size: 11px; font-weight: 600; }
+  .badge-green   { background: #1b4332; color: var(--green); }
+  .badge-red     { background: #3d1c1c; color: var(--red); }
+  .badge-yellow  { background: #332d00; color: var(--yellow); }
+  .badge-blue    { background: #1c2d3d; color: var(--accent); }
+  .badge-orange  { background: #3d2000; color: var(--orange); }
+  .badge-muted   { background: #21262d; color: var(--muted); }
+  /* Findings */
+  .finding-row { border-left: 3px solid var(--red); padding: 8px 12px; margin-bottom: 6px; border-radius: 0 4px 4px 0; font-size: 13px; }
+  /* Port state */
+  .port-open { color: var(--green); font-weight: 600; }
+  /* Tech tag */
+  .tech-tag { display: inline-block; background: #21262d; border: 1px solid var(--border); border-radius: 4px; padding: 2px 8px; margin: 2px; font-size: 12px; color: var(--accent); }
+  /* Footer */
+  .footer { text-align: center; color: var(--muted); font-size: 12px; margin-top: 32px; padding: 16px; }
+  /* Nav */
+  .nav { display: flex; gap: 8px; flex-wrap: wrap; margin-bottom: 20px; }
+  .nav a { background: var(--surface); border: 1px solid var(--border); border-radius: 6px; padding: 6px 14px; font-size: 13px; color: var(--text); transition: border-color .2s; }
+  .nav a:hover { border-color: var(--accent); color: var(--accent); }
+  pre { background: #0d1117; border: 1px solid var(--border); border-radius: 6px; padding: 12px; overflow-x: auto; font-size: 12px; color: var(--muted); }
+  .empty { color: var(--muted); font-style: italic; padding: 8px 0; }
+  .chart-box { background: #0d1117; border: 1px solid var(--border); border-radius: 6px; padding: 12px; margin-top: 12px; }
+  .two-col { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
+  @media (max-width: 700px) { .two-col { grid-template-columns: 1fr; } .header { flex-direction: column; gap: 12px; } }
+"""
+
+_JS = """
+function toggleSection(header) {
+  const body = header.nextElementSibling;
+  const isHidden = body.style.display === 'none';
+  body.style.display = isHidden ? '' : 'none';
+  header.classList.toggle('collapsed', !isHidden);
+}
+// Collapse all except findings by default on large reports
+document.addEventListener('DOMContentLoaded', function() {
+  document.querySelectorAll('.section-body[data-collapse]').forEach(b => {
+    b.style.display = 'none';
+    b.previousElementSibling.classList.add('collapsed');
+  });
+});
+"""
 
 _HTML_TEMPLATE = """<!DOCTYPE html>
 <html lang="en">
@@ -44,73 +267,10 @@ _HTML_TEMPLATE = """<!DOCTYPE html>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>ReconX Report — {target}</title>
-  <style>
-    :root {{
-      --bg: #0d1117;
-      --surface: #161b22;
-      --border: #30363d;
-      --accent: #58a6ff;
-      --green: #3fb950;
-      --red: #f85149;
-      --yellow: #d29922;
-      --orange: #db6d28;
-      --text: #c9d1d9;
-      --muted: #8b949e;
-    }}
-    * {{ box-sizing: border-box; margin: 0; padding: 0; }}
-    body {{ background: var(--bg); color: var(--text); font-family: 'Segoe UI', system-ui, sans-serif; font-size: 14px; line-height: 1.6; }}
-    a {{ color: var(--accent); text-decoration: none; }}
-    .container {{ max-width: 1200px; margin: 0 auto; padding: 24px; }}
-    /* Header */
-    .header {{ background: var(--surface); border: 1px solid var(--border); border-radius: 8px; padding: 24px; margin-bottom: 24px; display: flex; align-items: center; justify-content: space-between; }}
-    .logo {{ font-size: 28px; font-weight: 700; color: var(--accent); letter-spacing: 2px; }}
-    .logo span {{ color: var(--red); }}
-    .meta {{ text-align: right; color: var(--muted); font-size: 12px; }}
-    .target-badge {{ background: #21262d; border: 1px solid var(--border); border-radius: 20px; padding: 6px 16px; font-family: monospace; color: var(--accent); margin-top: 8px; display: inline-block; }}
-    /* Summary cards */
-    .cards {{ display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 16px; margin-bottom: 24px; }}
-    .card {{ background: var(--surface); border: 1px solid var(--border); border-radius: 8px; padding: 16px; text-align: center; }}
-    .card-number {{ font-size: 36px; font-weight: 700; color: var(--accent); }}
-    .card-label {{ color: var(--muted); font-size: 12px; margin-top: 4px; text-transform: uppercase; letter-spacing: 1px; }}
-    /* Section */
-    .section {{ background: var(--surface); border: 1px solid var(--border); border-radius: 8px; margin-bottom: 20px; overflow: hidden; }}
-    .section-header {{ padding: 14px 20px; border-bottom: 1px solid var(--border); display: flex; align-items: center; gap: 10px; background: #1c2128; }}
-    .section-title {{ font-size: 15px; font-weight: 600; }}
-    .section-body {{ padding: 16px 20px; }}
-    /* Table */
-    table {{ width: 100%; border-collapse: collapse; }}
-    th {{ text-align: left; color: var(--muted); font-size: 11px; text-transform: uppercase; letter-spacing: 1px; padding: 8px 12px; border-bottom: 1px solid var(--border); }}
-    td {{ padding: 8px 12px; border-bottom: 1px solid #21262d; font-family: monospace; font-size: 13px; vertical-align: top; }}
-    tr:last-child td {{ border-bottom: none; }}
-    tr:hover td {{ background: #1c2128; }}
-    /* Badges */
-    .badge {{ display: inline-block; padding: 2px 8px; border-radius: 12px; font-size: 11px; font-weight: 600; }}
-    .badge-green {{ background: #1b4332; color: var(--green); }}
-    .badge-red {{ background: #3d1c1c; color: var(--red); }}
-    .badge-yellow {{ background: #332d00; color: var(--yellow); }}
-    .badge-blue {{ background: #1c2d3d; color: var(--accent); }}
-    .badge-orange {{ background: #3d2000; color: var(--orange); }}
-    /* Finding */
-    .finding {{ background: #3d1c1c; border-left: 3px solid var(--red); padding: 8px 12px; margin-bottom: 6px; border-radius: 0 4px 4px 0; font-size: 13px; }}
-    .finding-warn {{ background: #332d00; border-left-color: var(--yellow); }}
-    .finding-info {{ background: #1c2d3d; border-left-color: var(--accent); }}
-    /* Port state */
-    .port-open {{ color: var(--green); font-weight: 600; }}
-    /* Tech tag */
-    .tech-tag {{ display: inline-block; background: #21262d; border: 1px solid var(--border); border-radius: 4px; padding: 2px 8px; margin: 2px; font-size: 12px; color: var(--accent); }}
-    /* Footer */
-    .footer {{ text-align: center; color: var(--muted); font-size: 12px; margin-top: 32px; padding: 16px; }}
-    /* Responsive nav */
-    .nav {{ display: flex; gap: 8px; flex-wrap: wrap; margin-bottom: 24px; }}
-    .nav a {{ background: var(--surface); border: 1px solid var(--border); border-radius: 6px; padding: 6px 14px; font-size: 13px; color: var(--text); transition: border-color .2s; }}
-    .nav a:hover {{ border-color: var(--accent); color: var(--accent); }}
-    pre {{ background: #0d1117; border: 1px solid var(--border); border-radius: 6px; padding: 12px; overflow-x: auto; font-size: 12px; color: var(--muted); }}
-    .empty {{ color: var(--muted); font-style: italic; padding: 8px 0; }}
-  </style>
+  <style>{style}</style>
 </head>
 <body>
 <div class="container">
-  <!-- Header -->
   <div class="header">
     <div>
       <div class="logo">Recon<span>X</span></div>
@@ -122,60 +282,202 @@ _HTML_TEMPLATE = """<!DOCTYPE html>
       <div>Version: {version}</div>
     </div>
   </div>
-
-  <!-- Nav -->
-  <div class="nav">
-    {nav_links}
-  </div>
-
-  <!-- Summary cards -->
-  <div class="cards">
-    {summary_cards}
-  </div>
-
-  <!-- Content sections -->
+  <div class="nav">{nav_links}</div>
+  <div class="cards">{summary_cards}</div>
   {sections}
-
   <div class="footer">ReconX v{version} — For authorised security testing only</div>
 </div>
+<script>{js}</script>
 </body>
 </html>"""
 
 
-def _badge(text: str, colour: str = "blue") -> str:
-    return f'<span class="badge badge-{colour}">{text}</span>'
+# ─────────────────────────────────────────────────────────────
+# Section builders
+# ─────────────────────────────────────────────────────────────
+
+def _port_section(scan: dict) -> tuple[str, str]:
+    open_ports = scan.get("open_ports", [])
+    rows = ""
+    for p in open_ports:
+        banner = (p.get("banner", "") or "")[:60]
+        version = (p.get("version", "") or "")[:30]
+        rows += f"""<tr>
+          <td class="port-open">{p['port']}</td>
+          <td>TCP</td>
+          <td>{_badge(p.get('service','?'), 'blue')}</td>
+          <td style="color:#58a6ff">{version}</td>
+          <td>{banner or '<span class="empty">—</span>'}</td>
+        </tr>"""
+
+    chart = ""
+    if open_ports:
+        chart = f'<div class="chart-box"><b style="font-size:12px;color:var(--muted)">Services</b>{_service_chart(open_ports)}</div>'
+
+    table = f"""<table>
+      <tr><th>Port</th><th>Proto</th><th>Service</th><th>Version</th><th>Banner</th></tr>
+      {rows or '<tr><td colspan="5" class="empty">No open ports found</td></tr>'}
+    </table>{chart}"""
+
+    return table, f'<a href="#ports">Ports ({len(open_ports)})</a>'
 
 
-def _section(title: str, icon: str, content: str, anchor: str = "") -> str:
-    anchor_attr = f'id="{anchor}"' if anchor else ""
-    return f"""
-<div class="section" {anchor_attr}>
-  <div class="section-header">
-    <span>{icon}</span>
-    <span class="section-title">{title}</span>
-  </div>
-  <div class="section-body">{content}</div>
-</div>"""
+def _udp_section(udp: dict) -> tuple[str, str]:
+    open_ports = udp.get("open_ports", [])
+    rows = ""
+    for p in open_ports:
+        state = p.get("state", "open|filtered")
+        state_col = "green" if state == "open" else "yellow"
+        rows += f"""<tr>
+          <td style="color:var(--yellow)">{p['port']}</td>
+          <td>UDP</td>
+          <td>{_badge(p.get('service','?'), 'blue')}</td>
+          <td>{_badge(state, state_col)}</td>
+          <td>{(p.get('banner','') or '')[:60]}</td>
+        </tr>"""
+
+    table = f"""<table>
+      <tr><th>Port</th><th>Proto</th><th>Service</th><th>State</th><th>Banner</th></tr>
+      {rows or '<tr><td colspan="5" class="empty">No UDP responses</td></tr>'}
+    </table>"""
+
+    return table, f'<a href="#udp">UDP ({len(open_ports)})</a>'
 
 
-def _findings_html(findings: list[str]) -> str:
-    if not findings:
-        return '<div class="empty">No findings.</div>'
-    html = ""
-    for f in findings:
-        cls = "finding"
-        if "CRITICAL" in f or "EXPIRED" in f or "EXPOSED" in f or "SUCCESSFUL" in f:
-            cls = "finding"
-        elif "missing" in f.lower() or "weak" in f.lower() or "deprecated" in f.lower():
-            cls = "finding finding-warn"
-        else:
-            cls = "finding finding-info"
-        html += f'<div class="{cls}">{f}</div>'
-    return html
+def _dns_section(dns: dict) -> tuple[str, str]:
+    records = dns.get("records", {})
+    total = sum(len(v) for v in records.values())
+    rows = ""
+    for rtype, recs in records.items():
+        for r in recs:
+            rows += f"<tr><td>{_badge(rtype, 'blue')}</td><td>{r['value']}</td></tr>"
 
+    zt_html = ""
+    for zt in dns.get("zone_transfers", []):
+        if zt.get("success"):
+            zt_html += f'<div class="finding-row" style="border-left-color:#f85149;background:#3d1c1c">{_sev_badge("CRITICAL")} Zone transfer SUCCESSFUL from {zt["nameserver"]}!</div>'
+
+    findings_html = _findings_html(dns.get("security_findings", []), "dns")
+
+    content = f"""<table>
+      <tr><th>Type</th><th>Value</th></tr>
+      {rows or '<tr><td colspan="2" class="empty">No records found</td></tr>'}
+    </table>"""
+    if zt_html:
+        content += "<br>" + zt_html
+    if dns.get("security_findings"):
+        content += "<br><b>Security Findings:</b><br>" + findings_html
+
+    return content, f'<a href="#dns">DNS ({total})</a>'
+
+
+def _crawl_section(crawl: dict) -> tuple[str, str]:
+    endpoints = crawl.get("endpoints", [])
+    js_files = crawl.get("js_files", [])
+    subdomains = crawl.get("discovered_subdomains", [])
+
+    ep_rows = ""
+    for ep in sorted(endpoints, key=lambda e: (e.get("status_code", 0), e.get("url", "")))[:100]:
+        sc = ep.get("status_code", 0)
+        sc_col = "green" if 200 <= sc < 300 else "yellow" if sc < 400 else "red"
+        note = ep.get("note", "")
+        ep_rows += f"""<tr>
+          <td><a href="{ep['url']}" target="_blank">{ep['url'][:70]}</a></td>
+          <td>{_badge(str(sc), sc_col) if sc else '<span class="empty">—</span>'}</td>
+          <td style="color:var(--muted);font-size:11px">{ep.get('source','')}</td>
+          <td style="color:var(--red)">{note}</td>
+        </tr>"""
+
+    all_ep: set[str] = set()
+    for js in js_files:
+        all_ep.update(js.get("endpoints_found", []))
+
+    js_html = ""
+    if all_ep:
+        ep_list = "".join(f"<tr><td>{e}</td></tr>" for e in sorted(all_ep)[:50])
+        js_html = f"""<br><details><summary style="cursor:pointer;color:var(--muted);font-size:12px">
+          API routes from JS ({len(all_ep)})
+        </summary><table><tr><th>Endpoint</th></tr>{ep_list}</table></details>"""
+
+    sub_html = ""
+    if subdomains:
+        sub_list = "".join(f"<span class='tech-tag'>{s}</span>" for s in subdomains[:20])
+        sub_html = f"<br><b>Subdomains in JS:</b><br>{sub_list}"
+
+    content = f"""<table>
+      <tr><th>URL</th><th>Status</th><th>Source</th><th>Note</th></tr>
+      {ep_rows or '<tr><td colspan="4" class="empty">No endpoints found</td></tr>'}
+    </table>{js_html}{sub_html}"""
+
+    return content, f'<a href="#crawl">Crawl ({len(endpoints)})</a>'
+
+
+def _ip_intel_section(intel: dict) -> tuple[str, str]:
+    asn = intel.get("asn") or {}
+    geo = intel.get("geo") or {}
+    ptr = intel.get("ptr_records", [])
+
+    rows = f"""
+      <tr><td>IP</td><td>{intel.get('ip','—')}</td></tr>
+      <tr><td>PTR</td><td>{', '.join(ptr) or '—'}</td></tr>
+      <tr><td>ASN</td><td>{asn.get('asn','—')} {asn.get('asn_name','')}</td></tr>
+      <tr><td>Network</td><td>{asn.get('cidr','—')}</td></tr>
+      <tr><td>Org</td><td>{asn.get('org','') or asn.get('asn_description','—')}</td></tr>
+      <tr><td>Cloud</td><td>{_badge(asn['cloud_provider'], 'blue') if asn.get('cloud_provider') else '—'}</td></tr>
+      <tr><td>Country</td><td>{asn.get('country','—')}</td></tr>
+      <tr><td>Location</td><td>{geo.get('city','—')}, {geo.get('country','—')}</td></tr>
+      <tr><td>ISP</td><td>{geo.get('isp','—')}</td></tr>
+    """
+    content = f"<table><tr><th>Field</th><th>Value</th></tr>{rows}</table>"
+    if intel.get("findings"):
+        content += "<br>" + _findings_html(intel["findings"], "ip_intel")
+
+    return content, '<a href="#ip_intel">IP Intel</a>'
+
+
+def _passive_section(passive: dict) -> tuple[str, str]:
+    content = ""
+    hosts = passive.get("hosts", [])
+    subs = passive.get("subdomains", [])
+    emails = passive.get("emails", [])
+    findings = passive.get("findings", [])
+
+    if findings:
+        content += _findings_html(findings, "passive")
+
+    if hosts:
+        rows = ""
+        for h in hosts:
+            ports = ", ".join(str(p) for p in h.get("ports", [])[:20])
+            rows += f"<tr><td>{h.get('ip','')}</td><td>{', '.join(h.get('hostnames',[]))}</td><td>{ports}</td><td>{_badge(h.get('source','?'), 'blue')}</td></tr>"
+        content += f"""<br><table>
+          <tr><th>IP</th><th>Hostnames</th><th>Open Ports</th><th>Source</th></tr>{rows}
+        </table>"""
+
+    if subs:
+        sub_tags = "".join(f"<span class='tech-tag'>{s}</span>" for s in subs[:30])
+        content += f"<br><b>Subdomains ({len(subs)}):</b><br>{sub_tags}"
+
+    if emails:
+        content += f"<br><b>Emails:</b> {', '.join(emails[:10])}"
+
+    if passive.get("abuse_score") is not None:
+        score = passive["abuse_score"]
+        col = "red" if score > 50 else "yellow" if score > 10 else "green"
+        content += f"<br><b>AbuseIPDB score:</b> {_badge(str(score) + '%', col)}"
+
+    if passive.get("vt_detections"):
+        content += f"<br><b>VirusTotal:</b> {_badge(str(passive['vt_detections']) + ' detections', 'red')}"
+
+    return content or '<div class="empty">No passive data found.</div>', '<a href="#passive">Passive</a>'
+
+
+# ─────────────────────────────────────────────────────────────
+# Main HTML generator
+# ─────────────────────────────────────────────────────────────
 
 def generate_html(data: dict, output_path: str) -> str:
-    """Generate a self-contained HTML report."""
+    """Generate a self-contained HTML report with severity scoring and charts."""
     path = Path(output_path)
     path.parent.mkdir(parents=True, exist_ok=True)
 
@@ -183,221 +485,215 @@ def generate_html(data: dict, output_path: str) -> str:
     generated_at = datetime.datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S UTC")
     sections_html = ""
     nav_links = ""
-    cards = []
+    cards: list[tuple[str, str, str, str]] = []   # (anchor, number, label, colour_class)
 
-    all_findings: list[str] = []
+    # ── Collect all findings for severity summary ──────────────
+    all_findings = []
 
-    # ── Port Scan ──────────────────────────────────
+    def _collect_str_findings(texts, module):
+        for t in (texts or []):
+            if isinstance(t, str) and t.strip():
+                all_findings.append({"sev": _classify_severity(t), "title": t, "module": module})
+
+    # ── Port Scan ────────────────────────────────────────────
     scan = data.get("port_scan")
     if scan:
-        open_ports = scan.get("open_ports", [])
-        cards.append(("open_ports", str(len(open_ports)), "Open Ports"))
+        port_content, port_nav = _port_section(scan if isinstance(scan, dict) else _serialise(scan))
+        open_count = len(scan.get("open_ports", []) if isinstance(scan, dict) else _serialise(scan).get("open_ports", []))
+        cards.append(("ports", str(open_count), "Open Ports (TCP)", ""))
+        sections_html += _section("Port Scan", "🔍", port_content, "ports")
+        nav_links += port_nav
 
-        rows = ""
-        for p in open_ports:
-            banner = p.get("banner", "")[:80]
-            rows += f"""<tr>
-              <td class="port-open">{p['port']}</td>
-              <td>TCP</td>
-              <td>{_badge(p.get('service','?'), 'blue')}</td>
-              <td>{banner or '<span class="empty">—</span>'}</td>
-            </tr>"""
+    # ── UDP ──────────────────────────────────────────────────
+    udp = data.get("udp")
+    if udp:
+        ud = udp if isinstance(udp, dict) else _serialise(udp)
+        udp_content, udp_nav = _udp_section(ud)
+        cards.append(("udp", str(len(ud.get("open_ports", []))), "UDP Ports", ""))
+        sections_html += _section("UDP Scan", "📡", udp_content, "udp")
+        nav_links += udp_nav
+        for p in ud.get("open_ports", []):
+            if p.get("service") in ("SNMP", "IKE/IPSec"):
+                all_findings.append({"sev": "HIGH", "title": f"{p['service']} open on UDP/{p['port']}", "module": "udp"})
 
-        table = f"""<table>
-          <tr><th>Port</th><th>Proto</th><th>Service</th><th>Banner</th></tr>
-          {rows if rows else '<tr><td colspan="4" class="empty">No open ports found</td></tr>'}
-        </table>"""
-
-        sections_html += _section("Port Scan", "🔍", table, "ports")
-        nav_links += '<a href="#ports">Ports</a>'
-
-    # ── DNS ────────────────────────────────────────
+    # ── DNS ──────────────────────────────────────────────────
     dns = data.get("dns")
     if dns:
-        records = dns.get("records", {})
-        total_records = sum(len(v) for v in records.values())
-        cards.append(("dns_records", str(total_records), "DNS Records"))
-
-        rows = ""
-        for rtype, recs in records.items():
-            for r in recs:
-                rows += f"<tr><td>{_badge(rtype, 'blue')}</td><td>{r['value']}</td></tr>"
-
-        dns_findings = dns.get("security_findings", [])
-        all_findings.extend(dns_findings)
-
-        zone_transfers = dns.get("zone_transfers", [])
-        zt_html = ""
-        for zt in zone_transfers:
+        dd = dns if isinstance(dns, dict) else _serialise(dns)
+        dns_content, dns_nav = _dns_section(dd)
+        total_dns = sum(len(v) for v in dd.get("records", {}).values())
+        cards.append(("dns", str(total_dns), "DNS Records", ""))
+        sections_html += _section("DNS Enumeration", "📡", dns_content, "dns")
+        nav_links += dns_nav
+        _collect_str_findings(dd.get("security_findings", []), "dns")
+        for zt in dd.get("zone_transfers", []):
             if zt.get("success"):
-                zt_html += f'<div class="finding">Zone transfer SUCCESSFUL from {zt["nameserver"]}!</div>'
+                all_findings.append({"sev": "CRITICAL", "title": f"Zone transfer SUCCESSFUL from {zt['nameserver']}", "module": "dns"})
 
-        table = f"""<table>
-          <tr><th>Type</th><th>Value</th></tr>
-          {rows if rows else '<tr><td colspan="2" class="empty">No records found</td></tr>'}
-        </table>"""
-
-        content = table
-        if dns_findings:
-            content += "<br><b>Security Findings:</b><br>" + _findings_html(dns_findings)
-        if zt_html:
-            content += zt_html
-
-        sections_html += _section("DNS Enumeration", "📡", content, "dns")
-        nav_links += '<a href="#dns">DNS</a>'
-
-    # ── Subdomains ─────────────────────────────────
+    # ── Subdomains ───────────────────────────────────────────
     subs = data.get("subdomains")
     if subs:
-        subdomain_list = subs.get("subdomains", [])
-        cards.append(("subdomains", str(len(subdomain_list)), "Subdomains"))
-
+        sd = subs if isinstance(subs, dict) else _serialise(subs)
+        subdomain_list = sd.get("subdomains", [])
+        cards.append(("subs", str(len(subdomain_list)), "Subdomains", ""))
         rows = ""
         for s in subdomain_list:
             ips = ", ".join(s.get("ips", [])) or "Unresolved"
-            source_colour = {"crtsh": "green", "hackertarget": "orange", "bruteforce": "blue"}.get(
-                s.get("source", "bruteforce"), "blue"
-            )
-            rows += f"""<tr>
-              <td style="font-family:monospace">{s['name']}</td>
-              <td>{ips}</td>
-              <td>{_badge(s.get('source','?'), source_colour)}</td>
-            </tr>"""
-
-        table = f"""<table>
-          <tr><th>Subdomain</th><th>IP(s)</th><th>Source</th></tr>
-          {rows if rows else '<tr><td colspan="3" class="empty">No subdomains found</td></tr>'}
+            sc_col = {"crtsh": "green", "hackertarget": "orange", "bruteforce": "blue", "passive": "yellow"}.get(s.get("source", ""), "blue")
+            rows += f"<tr><td>{s['name']}</td><td>{ips}</td><td>{_badge(s.get('source','?'), sc_col)}</td></tr>"
+        table = f"""<table><tr><th>Subdomain</th><th>IP(s)</th><th>Source</th></tr>
+          {rows or '<tr><td colspan="3" class="empty">No subdomains found</td></tr>'}
         </table>"""
-
         sections_html += _section("Subdomain Enumeration", "🌐", table, "subs")
-        nav_links += '<a href="#subs">Subdomains</a>'
+        nav_links += f'<a href="#subs">Subdomains ({len(subdomain_list)})</a>'
 
-    # ── HTTP ───────────────────────────────────────
+    # ── HTTP ─────────────────────────────────────────────────
     http_results = data.get("http", [])
     if http_results:
+        http_list = [r if isinstance(r, dict) else _serialise(r) for r in http_results]
         tech_set: set[str] = set()
-        for r in http_results:
+        for r in http_list:
             for t in r.get("technologies", []):
                 tech_set.add(t.get("name", ""))
 
-        cards.append(("techs", str(len(tech_set)), "Technologies"))
-
+        cards.append(("http", str(len(tech_set)), "Technologies", ""))
         content = ""
-        for r in http_results:
+        for r in http_list:
             url = r.get("url", "")
             status = r.get("status_code", 0)
-            status_colour = "green" if 200 <= status < 300 else "red" if status >= 400 else "yellow"
-            title = r.get("title", "")
-            server = r.get("server", "")
-            techs = r.get("technologies", [])
+            sc_col = "green" if 200 <= status < 300 else "red" if status >= 400 else "yellow"
+            techs = "".join(f'<span class="tech-tag">{t["name"]}</span>' for t in r.get("technologies", []))
             missing = r.get("missing_security_headers", [])
             paths = r.get("interesting_paths", [])
-
-            tech_tags = "".join(f'<span class="tech-tag">{t["name"]}</span>' for t in techs)
-            missing_html = _findings_html(missing)
+            _collect_str_findings(missing, "http")
+            for ip_path in paths:
+                note = ip_path.get("note", "") if isinstance(ip_path, dict) else ""
+                if note:
+                    all_findings.append({"sev": _classify_severity(note), "title": note, "module": "http"})
 
             path_rows = ""
-            for ip in paths:
-                note_html = f' <span style="color:var(--red)">{ip["note"]}</span>' if ip.get("note") else ""
-                status_c = "green" if ip["status_code"] == 200 else "yellow"
-                path_rows += f"<tr><td>{ip['path']}</td><td>{_badge(str(ip['status_code']), status_c)}</td><td>{note_html}</td></tr>"
+            for ip_p in paths:
+                ip_d = ip_p if isinstance(ip_p, dict) else {}
+                sc2_col = "green" if ip_d.get("status_code") == 200 else "yellow"
+                path_rows += f"<tr><td>{ip_d.get('path','')}</td><td>{_badge(str(ip_d.get('status_code',0)), sc2_col)}</td><td style='color:var(--red)'>{ip_d.get('note','')}</td></tr>"
 
-            endpoint_html = f"""
+            content += f"""
 <div style="margin-bottom:20px;padding-bottom:20px;border-bottom:1px solid var(--border)">
   <div style="margin-bottom:8px">
-    <b><a href="{url}" target="_blank">{url}</a></b>
-    {_badge(str(status), status_colour)}
-    {f'<span style="color:var(--muted);margin-left:8px">{title}</span>' if title else ''}
+    <b><a href="{url}" target="_blank">{url}</a></b> {_badge(str(status), sc_col)}
+    {f'<span style="color:var(--muted);margin-left:8px">{r.get("title","")}</span>' if r.get("title") else ''}
   </div>
-  {f'<div style="margin-bottom:6px"><span class="badge badge-blue">Server</span> {server}</div>' if server else ''}
-  <div style="margin-bottom:8px">{tech_tags if tech_tags else '<span class="empty">No technologies detected</span>'}</div>
-  {'<details><summary style="cursor:pointer;color:var(--muted);font-size:12px">Missing Security Headers (' + str(len(missing)) + ')</summary>' + missing_html + '</details>' if missing else ''}
+  {f'<div style="margin-bottom:6px">{_badge("Server","blue")} {r.get("server","")}</div>' if r.get("server") else ''}
+  <div style="margin-bottom:8px">{techs or '<span class="empty">No technologies detected</span>'}</div>
+  {'<details><summary style="cursor:pointer;color:var(--muted);font-size:12px">Missing Headers (' + str(len(missing)) + ')</summary>' + _findings_html(missing, "http") + '</details>' if missing else ''}
   {'<details><summary style="cursor:pointer;color:var(--muted);font-size:12px">Interesting Paths (' + str(len(paths)) + ')</summary><table><tr><th>Path</th><th>Status</th><th>Note</th></tr>' + path_rows + '</table></details>' if paths else ''}
 </div>"""
-            content += endpoint_html
-
-        all_missing = [m for r in http_results for m in r.get("missing_security_headers", [])]
-        all_findings.extend(all_missing)
 
         sections_html += _section("HTTP Probing & Technology Fingerprinting", "🕵️", content, "http")
-        nav_links += '<a href="#http">HTTP</a>'
+        nav_links += f'<a href="#http">HTTP ({len(http_list)})</a>'
 
-    # ── SSL ───────────────────────────────────────
+    # ── Web Crawl ────────────────────────────────────────────
+    crawl = data.get("crawl")
+    if crawl:
+        cd = crawl if isinstance(crawl, dict) else _serialise(crawl)
+        crawl_content, crawl_nav = _crawl_section(cd)
+        cards.append(("crawl", str(len(cd.get("endpoints", []))), "Crawled Endpoints", ""))
+        sections_html += _section("Web Crawl & Endpoint Discovery", "🕸️", crawl_content, "crawl")
+        nav_links += crawl_nav
+
+    # ── SSL ──────────────────────────────────────────────────
     ssl_result = data.get("ssl")
-    if ssl_result and not ssl_result.get("error"):
-        cert = ssl_result.get("cert", {})
-        ssl_findings = ssl_result.get("findings", [])
-        all_findings.extend(ssl_findings)
+    if ssl_result and not (ssl_result.get("error") if isinstance(ssl_result, dict) else getattr(ssl_result, "error", None)):
+        sd2 = ssl_result if isinstance(ssl_result, dict) else _serialise(ssl_result)
+        cert = sd2.get("cert") or {}
+        days = cert.get("days_until_expiry", 0)
+        expiry_col = "red" if days < 0 else "yellow" if days < 30 else "green"
+        subject = cert.get("subject") or {}
+        issuer = cert.get("issuer") or {}
+        san = cert.get("san") or []
+        ssl_findings = sd2.get("findings", [])
+        _collect_str_findings(ssl_findings, "ssl")
 
-        days = cert.get("days_until_expiry", 0) if cert else 0
-        expiry_colour = "red" if days < 0 else "yellow" if days < 30 else "green"
+        cert_html = f"""<table>
+          <tr><th>Field</th><th>Value</th></tr>
+          <tr><td>Subject CN</td><td>{subject.get('commonName','—')}</td></tr>
+          <tr><td>Issuer</td><td>{issuer.get('organizationName','—')}</td></tr>
+          <tr><td>Valid From</td><td>{cert.get('not_before','—')}</td></tr>
+          <tr><td>Valid Until</td><td>{cert.get('not_after','—')} {_badge(str(days)+' days', expiry_col)}</td></tr>
+          <tr><td>Self-Signed</td><td>{_badge('YES','red') if cert.get('is_self_signed') else _badge('No','green')}</td></tr>
+          <tr><td>SANs</td><td>{'<br>'.join(san[:10]) if san else '—'}</td></tr>
+          <tr><td>Cipher</td><td>{sd2.get('cipher','—')} ({sd2.get('cipher_bits',0)} bits)</td></tr>
+        </table>"""
 
-        subject = cert.get("subject", {}) if cert else {}
-        issuer = cert.get("issuer", {}) if cert else {}
-        san = cert.get("san", []) if cert else []
+        protos = sd2.get("protocols", [])
+        proto_rows = "".join(
+            f"<tr><td>{p['name']}</td><td>"
+            f"{_badge('Supported', 'red' if p.get('deprecated') else 'green') if p['supported'] else _badge('Not Supported','muted')}"
+            f"</td></tr>"
+            for p in protos
+        )
+        proto_html = f"<br><b>Protocol Support:</b><table><tr><th>Protocol</th><th>Status</th></tr>{proto_rows}</table>" if protos else ""
+        findings_html = ("<br><b>Findings:</b><br>" + _findings_html(ssl_findings, "ssl")) if ssl_findings else ""
 
-        cert_html = ""
-        if cert:
-            cert_html = f"""<table>
-              <tr><th>Field</th><th>Value</th></tr>
-              <tr><td>Subject CN</td><td>{subject.get('commonName', '—')}</td></tr>
-              <tr><td>Issuer</td><td>{issuer.get('organizationName', '—')}</td></tr>
-              <tr><td>Valid From</td><td>{cert.get('not_before','—')}</td></tr>
-              <tr><td>Valid Until</td><td>{cert.get('not_after','—')} {_badge(str(days) + ' days', expiry_colour)}</td></tr>
-              <tr><td>Self-Signed</td><td>{_badge('YES', 'red') if cert.get('is_self_signed') else _badge('No', 'green')}</td></tr>
-              <tr><td>SANs</td><td>{'<br>'.join(san) if san else '—'}</td></tr>
-              <tr><td>Cipher Suite</td><td>{ssl_result.get('cipher','—')} ({ssl_result.get('cipher_bits',0)} bits)</td></tr>
-            </table>"""
-
-        protos = ssl_result.get("protocols", [])
-        proto_html = ""
-        if protos:
-            proto_rows = "".join(
-                f"<tr><td>{p['name']}</td><td>"
-                f"{_badge('Supported', 'red' if p.get('deprecated') else 'green') if p['supported'] else _badge('Not Supported', 'muted')}"
-                f"</td></tr>"
-                for p in protos
-            )
-            proto_html = f"<br><b>Protocol Support:</b><table><tr><th>Protocol</th><th>Status</th></tr>{proto_rows}</table>"
-
-        content = cert_html + proto_html
-        if ssl_findings:
-            content += "<br><b>Findings:</b><br>" + _findings_html(ssl_findings)
-
-        sections_html += _section("SSL/TLS Analysis", "🔒", content, "ssl")
+        sections_html += _section("SSL/TLS Analysis", "🔒", cert_html + proto_html + findings_html, "ssl")
         nav_links += '<a href="#ssl">SSL/TLS</a>'
 
-    # ── WHOIS ─────────────────────────────────────
+    # ── WHOIS ────────────────────────────────────────────────
     whois = data.get("whois")
-    if whois and not whois.get("error"):
+    if whois and not (whois.get("error") if isinstance(whois, dict) else getattr(whois, "error", None)):
+        wd = whois if isinstance(whois, dict) else _serialise(whois)
         rows = f"""
-          <tr><td>Registrar</td><td>{whois.get('registrar','—')}</td></tr>
-          <tr><td>Created</td><td>{whois.get('creation_date','—')}</td></tr>
-          <tr><td>Expires</td><td>{whois.get('expiration_date','—')}</td></tr>
-          <tr><td>Updated</td><td>{whois.get('updated_date','—')}</td></tr>
-          <tr><td>Country</td><td>{whois.get('registrant_country','—')}</td></tr>
-          <tr><td>DNSSEC</td><td>{whois.get('dnssec','—')}</td></tr>
-          <tr><td>Name Servers</td><td>{'<br>'.join(whois.get('name_servers',[]))}</td></tr>
-          <tr><td>Status</td><td>{'<br>'.join(whois.get('status',[]))}</td></tr>
+          <tr><td>Registrar</td><td>{wd.get('registrar','—')}</td></tr>
+          <tr><td>Created</td><td>{wd.get('creation_date','—')}</td></tr>
+          <tr><td>Expires</td><td>{wd.get('expiration_date','—')}</td></tr>
+          <tr><td>Country</td><td>{wd.get('registrant_country','—')}</td></tr>
+          <tr><td>DNSSEC</td><td>{wd.get('dnssec','—')}</td></tr>
+          <tr><td>Name Servers</td><td>{'<br>'.join(wd.get('name_servers',[]))}</td></tr>
         """
-        table = f"<table><tr><th>Field</th><th>Value</th></tr>{rows}</table>"
-        sections_html += _section("WHOIS", "📋", table, "whois")
+        sections_html += _section("WHOIS", "📋", f"<table><tr><th>Field</th><th>Value</th></tr>{rows}</table>", "whois")
         nav_links += '<a href="#whois">WHOIS</a>'
 
-    # ── Findings Summary ──────────────────────────
+    # ── IP Intel ─────────────────────────────────────────────
+    ip_intel = data.get("ip_intel")
+    if ip_intel:
+        id2 = ip_intel if isinstance(ip_intel, dict) else _serialise(ip_intel)
+        intel_content, intel_nav = _ip_intel_section(id2)
+        sections_html += _section("IP & ASN Intelligence", "🌍", intel_content, "ip_intel")
+        nav_links += intel_nav
+        _collect_str_findings(id2.get("findings", []), "ip_intel")
+
+    # ── Passive Sources ──────────────────────────────────────
+    passive = data.get("passive")
+    if passive:
+        pd2 = passive if isinstance(passive, dict) else _serialise(passive)
+        passive_content, passive_nav = _passive_section(pd2)
+        sections_html += _section("Passive Intelligence", "🔭", passive_content, "passive")
+        nav_links += passive_nav
+        _collect_str_findings(pd2.get("findings", []), "passive")
+
+    # ── Severity Summary (prepended, always shown) ───────────
     if all_findings:
-        cards.append(("findings", str(len(all_findings)), "Total Findings"))
-        findings_content = _findings_html(all_findings)
-        sections_html = _section("Security Findings Summary", "⚠️", findings_content, "findings") + sections_html
+        counts = {"CRITICAL": 0, "HIGH": 0, "MEDIUM": 0, "LOW": 0, "INFO": 0}
+        for f in all_findings:
+            counts[f["sev"]] = counts.get(f["sev"], 0) + 1
+
+        # Severity cards
+        for sev, col_class in [("CRITICAL", "critical"), ("HIGH", "high"), ("MEDIUM", "medium")]:
+            if counts[sev]:
+                cards.insert(0, ("findings", str(counts[sev]), f"{sev} Findings", col_class))
+
+        chart_html = f'<div class="chart-box">{_severity_chart(counts)}</div>'
+        findings_content = chart_html + "<br>" + _findings_html(
+            [type("F", (), {"severity": type("S", (), {"value": f["sev"]})(), "title": f["title"], "detail": "", "module": f["module"]})() for f in all_findings]
+        )
+        sections_html = _section("Security Findings", "⚠️", findings_content, "findings") + sections_html
         nav_links = '<a href="#findings">⚠️ Findings</a>' + nav_links
 
-    # ── Render ─────────────────────────────────────
+    # ── Render ────────────────────────────────────────────────
     cards_html = "".join(
-        f"""<div class="card">
-          <div class="card-number">{num}</div>
-          <div class="card-label">{label}</div>
-        </div>"""
-        for _, num, label in cards
+        f'<div class="card"><div class="card-number {col_class}">{num}</div>'
+        f'<div class="card-label">{label}</div></div>'
+        for _, num, label, col_class in cards
     )
 
     html = _HTML_TEMPLATE.format(
@@ -407,6 +703,8 @@ def generate_html(data: dict, output_path: str) -> str:
         nav_links=nav_links,
         summary_cards=cards_html,
         sections=sections_html,
+        style=_STYLE,
+        js=_JS,
     )
 
     path.write_text(html)
