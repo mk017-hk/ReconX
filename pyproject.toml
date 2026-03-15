@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "reconx"
-version = "1.1.0"
+version = "1.2.0"
 description = "All-in-one Reconnaissance & Pentesting Toolkit"
 readme = "README.md"
 license = { text = "MIT" }
@@ -38,6 +38,10 @@ dev = [
     "pytest>=7.4",
     "pytest-asyncio>=0.23",
     "pytest-cov>=4.1",
+]
+config = [
+    "pyyaml>=6.0",
+    "tomli>=2.0; python_version < '3.11'",
 ]
 
 [project.scripts]
