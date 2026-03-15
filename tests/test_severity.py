@@ -53,6 +53,34 @@ class TestMakeFinding:
         f = make_finding("weak cipher", detail="RC4 detected", module="ssl")
         assert f.detail == "RC4 detected"
 
+    def test_category_inferred_from_module(self):
+        f = make_finding("some finding", module="ssl")
+        assert f.category == "tls"
+
+    def test_category_dns(self):
+        f = make_finding("No SPF record", module="dns")
+        assert f.category == "dns"
+
+    def test_category_web(self):
+        f = make_finding("CSP missing", module="http")
+        assert f.category == "web"
+
+    def test_category_network(self):
+        f = make_finding("Telnet open on TCP/23", module="ports")
+        assert f.category == "network"
+
+    def test_category_infrastructure(self):
+        f = make_finding("Hosted on AWS", module="ip_intel")
+        assert f.category == "infrastructure"
+
+    def test_explicit_category_overrides_inferred(self):
+        f = make_finding("some finding", module="ports", category="custom")
+        assert f.category == "custom"
+
+    def test_unknown_module_leaves_category_empty(self):
+        f = make_finding("some finding", module="unknown_module")
+        assert f.category == ""
+
 
 class TestScoreFindings:
     def test_counts_severities(self):

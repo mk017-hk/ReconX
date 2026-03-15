@@ -1,15 +1,26 @@
 """
-Port scanner module - async TCP port scanning with protocol-aware service/version detection.
+Port scanner module — async TCP scanning with service-aware version detection.
+
+Key features:
+  - Concurrent async TCP port scanning
+  - Protocol-aware banner grabbing (SSH, FTP, SMTP, HTTP, Redis, MySQL, etc.)
+  - Structured (product, version) extraction per service type
+  - Confidence scoring based on fingerprint quality
+  - Rate limiting via delay/jitter parameters
 """
 
 import asyncio
+import logging
 import re
 import socket
 import ssl
 from dataclasses import dataclass, field
-from typing import Optional
+from typing import Callable, Optional
 
 from rich.progress import Progress, SpinnerColumn, BarColumn, TaskProgressColumn, TextColumn
+
+log = logging.getLogger(__name__)
+
 
 # ─────────────────────────────────────────────────────────────
 # Service map & port lists
@@ -37,69 +48,228 @@ TOP_100_PORTS = [
     27018, 27019, 28017, 50000, 50070, 50075,
 ]
 
+# Ports that should be wrapped in TLS when banner grabbing
+_TLS_PORTS = {443, 8443, 465, 636, 993, 995, 2376}
+
+
 # ─────────────────────────────────────────────────────────────
 # Protocol-aware probes  {port: (probe_bytes, read_bytes)}
 # ─────────────────────────────────────────────────────────────
 
 _PROBES: dict[int, tuple[bytes, int]] = {
     # Connect-time banner protocols (send nothing, read banner)
-    21:    (b"",                              512),   # FTP
-    22:    (b"",                              256),   # SSH
-    25:    (b"EHLO reconx\r\n",              512),   # SMTP
-    110:   (b"",                              256),   # POP3
-    143:   (b"",                              256),   # IMAP
-    587:   (b"EHLO reconx\r\n",              512),   # SMTP submission
-    465:   (b"EHLO reconx\r\n",              512),   # SMTPS
+    21:    (b"",                                             512),   # FTP
+    22:    (b"",                                             256),   # SSH
+    25:    (b"EHLO reconx\r\n",                             512),   # SMTP
+    110:   (b"",                                             256),   # POP3
+    143:   (b"",                                             256),   # IMAP
+    587:   (b"EHLO reconx\r\n",                             512),   # SMTP submission
+    465:   (b"EHLO reconx\r\n",                             512),   # SMTPS
     # HTTP
-    80:    (b"HEAD / HTTP/1.0\r\nHost: {host}\r\n\r\n",  2048),
-    8080:  (b"HEAD / HTTP/1.0\r\nHost: {host}\r\n\r\n",  2048),
-    8000:  (b"HEAD / HTTP/1.0\r\nHost: {host}\r\n\r\n",  2048),
-    8008:  (b"HEAD / HTTP/1.0\r\nHost: {host}\r\n\r\n",  2048),
-    8081:  (b"HEAD / HTTP/1.0\r\nHost: {host}\r\n\r\n",  2048),
-    8888:  (b"HEAD / HTTP/1.0\r\nHost: {host}\r\n\r\n",  2048),
+    80:    (b"HEAD / HTTP/1.0\r\nHost: {host}\r\n\r\n",   2048),
+    8080:  (b"HEAD / HTTP/1.0\r\nHost: {host}\r\n\r\n",   2048),
+    8000:  (b"HEAD / HTTP/1.0\r\nHost: {host}\r\n\r\n",   2048),
+    8008:  (b"HEAD / HTTP/1.0\r\nHost: {host}\r\n\r\n",   2048),
+    8081:  (b"HEAD / HTTP/1.0\r\nHost: {host}\r\n\r\n",   2048),
+    8888:  (b"HEAD / HTTP/1.0\r\nHost: {host}\r\n\r\n",   2048),
     # Redis – inline PING
-    6379:  (b"*1\r\n$4\r\nPING\r\n",        256),
+    6379:  (b"*1\r\n$4\r\nPING\r\n",                       256),
     # Memcached – stats
-    11211: (b"version\r\n",                  256),
+    11211: (b"version\r\n",                                 256),
     # MySQL – read handshake (send nothing)
-    3306:  (b"",                              512),
+    3306:  (b"",                                             512),
     # PostgreSQL – send nothing, read error banner
-    5432:  (b"",                              256),
+    5432:  (b"",                                             256),
     # MongoDB – OP_MSG isMaster
-    27017: (b"\x41\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\xd4\x07\x00\x00"
-             b"\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00"
-             b"\x00\xff\xff\xff\xff\x08\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00"
-             b"\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00"
-             b"\x00\x00\x00\x00",  512),
-    # Generic fallback
-    23:    (b"",                              256),   # Telnet
+    27017: (
+        b"\x41\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\xd4\x07\x00\x00"
+        b"\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00"
+        b"\x00\xff\xff\xff\xff\x08\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00"
+        b"\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00"
+        b"\x00\x00\x00\x00",
+        512,
+    ),
+    # Telnet
+    23:    (b"",                                             256),
 }
 
-# ─────────────────────────────────────────────────────────────
-# Version extraction regexes  {service: [(pattern, group_template)]}
-# ─────────────────────────────────────────────────────────────
 
-_VERSION_PATTERNS: list[tuple[str, re.Pattern, str]] = [
-    # SSH: "SSH-2.0-OpenSSH_8.9p1 Ubuntu-3ubuntu0.4"
-    ("SSH",        re.compile(r"SSH-[\d.]+-(\S+)"),                      r"\1"),
-    # FTP: "220 ProFTPD 1.3.6 Server"  /  "220 FileZilla Server 1.8.1"
-    ("FTP",        re.compile(r"220[- ].*?(ProFTPD|vsftpd|FileZilla Server|Pure-FTPd|WU-FTPD)[/ ]?([\d.]+)?", re.I),  r"\1 \2"),
-    # SMTP: "220 mail.example.com ESMTP Postfix (Ubuntu)"
-    ("SMTP",       re.compile(r"220[- ]\S+ ESMTP (\S+)(?: \(([^)]+)\))?", re.I), r"\1 \2"),
-    # POP3 / IMAP banners
-    ("POP3",       re.compile(r"\+OK (.*?)\r?\n", re.I),                 r"\1"),
-    ("IMAP",       re.compile(r"\* OK (.*?) ready", re.I),               r"\1"),
-    # HTTP Server header
-    ("HTTP",       re.compile(r"Server:\s*(.+?)[\r\n]", re.I),           r"\1"),
-    # Redis: "+PONG"  or  "redis_version:7.0.5"
-    ("Redis",      re.compile(r"redis_version:([\d.]+)", re.I),          r"Redis \1"),
-    # Memcached: "VERSION 1.6.17"
-    ("Memcached",  re.compile(r"VERSION ([\d.]+)", re.I),                r"Memcached \1"),
-    # MySQL handshake starts with length + protocol version byte + version string
-    ("MySQL",      re.compile(r"[\x00-\xff]{4}\x0a([\d.a-zA-Z_-]+)\x00", re.S), r"MySQL \1"),
-    # MongoDB: look for "ismaster" or version string in response
-    ("MongoDB",    re.compile(r'"version"\s*:\s*"([\d.]+)"'),            r"MongoDB \1"),
-]
+# ─────────────────────────────────────────────────────────────
+# Service-aware banner fingerprinting
+# ─────────────────────────────────────────────────────────────
+#
+# Each function receives the raw banner string and returns (product, version).
+# An empty string for either field means "not identified".
+
+def _fp_ssh(raw: str) -> tuple[str, str]:
+    """SSH-2.0-OpenSSH_8.9p1 Ubuntu-3ubuntu0.4"""
+    m = re.search(r"SSH-[\d.]+-(\w+)[_-]([\d]+\.[\d.a-z]+)", raw)
+    if m:
+        return m.group(1), m.group(2)
+    m = re.search(r"SSH-[\d.]+-(\S+)", raw)
+    if m:
+        return m.group(1), ""
+    return "", ""
+
+
+def _fp_ftp(raw: str) -> tuple[str, str]:
+    """220 ProFTPD 1.3.6 Server ..."""
+    m = re.search(
+        r"220[- ].*?(ProFTPD|vsftpd|FileZilla Server|Pure-FTPd|WU-FTPD)[/ ]?([\d.]+)?",
+        raw, re.I,
+    )
+    if m:
+        return m.group(1), (m.group(2) or "")
+    return "", ""
+
+
+def _fp_smtp(raw: str) -> tuple[str, str]:
+    """220 mail.example.com ESMTP Postfix (Ubuntu)"""
+    m = re.search(
+        r"220[- ]\S+ ESMTP (Postfix|Exim|Sendmail|Microsoft Exchange)[/ ]?([\d.]+)?",
+        raw, re.I,
+    )
+    if m:
+        return m.group(1), (m.group(2) or "")
+    return "", ""
+
+
+def _fp_pop3(raw: str) -> tuple[str, str]:
+    """+OK Dovecot ready."""
+    m = re.search(r"\+OK\s+(.*?)\s+ready", raw, re.I)
+    if m:
+        return m.group(1), ""
+    m = re.search(r"\+OK\s+(\S+)", raw, re.I)
+    if m:
+        return m.group(1), ""
+    return "", ""
+
+
+def _fp_imap(raw: str) -> tuple[str, str]:
+    """* OK [CAPABILITY ...] Dovecot ready."""
+    m = re.search(r"\* OK\s+(.*?)\s+ready", raw, re.I)
+    if m:
+        return m.group(1), ""
+    return "", ""
+
+
+def _fp_http(raw: str) -> tuple[str, str]:
+    """Server: Apache/2.4.41 (Ubuntu)  /  Server: nginx/1.24.0"""
+    # Match the product token (letters, digits, dots, dashes) then optional /version
+    m = re.search(r"Server:\s*([a-zA-Z0-9._-]+)(?:/([\d.]+))?", raw, re.I)
+    if m:
+        return m.group(1), (m.group(2) or "")
+    return "", ""
+
+
+def _fp_redis(raw: str) -> tuple[str, str]:
+    """redis_version:7.0.5"""
+    m = re.search(r"redis_version:([\d.]+)", raw, re.I)
+    if m:
+        return "Redis", m.group(1)
+    if "+PONG" in raw:
+        return "Redis", ""
+    return "", ""
+
+
+def _fp_memcached(raw: str) -> tuple[str, str]:
+    """VERSION 1.6.17"""
+    m = re.search(r"VERSION ([\d.]+)", raw, re.I)
+    if m:
+        return "Memcached", m.group(1)
+    return "", ""
+
+
+def _fp_mysql(raw: str) -> tuple[str, str]:
+    """MySQL handshake packet — 4-byte length + \x0a + version string + \x00"""
+    m = re.search(rb"[\x00-\xff]{4}\x0a([\d.a-zA-Z_-]+)\x00", raw.encode("latin-1"), re.S)
+    if m:
+        return "MySQL", m.group(1).decode("latin-1")
+    return "", ""
+
+
+def _fp_postgresql(raw: str) -> tuple[str, str]:
+    """PostgreSQL error banner: 'FATAL:  invalid frontend message type'"""
+    if "PostgreSQL" in raw or "postgres" in raw.lower():
+        m = re.search(r"PostgreSQL ([\d.]+)", raw, re.I)
+        if m:
+            return "PostgreSQL", m.group(1)
+        return "PostgreSQL", ""
+    return "", ""
+
+
+def _fp_mongodb(raw: str) -> tuple[str, str]:
+    """MongoDB OP_MSG response containing version string"""
+    m = re.search(r'"version"\s*:\s*"([\d.]+)"', raw)
+    if m:
+        return "MongoDB", m.group(1)
+    return "", ""
+
+
+def _fp_elasticsearch(raw: str) -> tuple[str, str]:
+    """Elasticsearch HTTP response with version in JSON"""
+    m = re.search(r'"number"\s*:\s*"([\d.]+)"', raw)
+    if m:
+        return "Elasticsearch", m.group(1)
+    return "", ""
+
+
+# Dispatch table: service name → fingerprint function
+_FINGERPRINT_FUNCS: dict[str, Callable[[str], tuple[str, str]]] = {
+    "SSH":           _fp_ssh,
+    "FTP":           _fp_ftp,
+    "SMTP":          _fp_smtp,
+    "SMTPS":         _fp_smtp,
+    "POP3":          _fp_pop3,
+    "POP3S":         _fp_pop3,
+    "IMAP":          _fp_imap,
+    "IMAPS":         _fp_imap,
+    "HTTP":          _fp_http,
+    "HTTPS":         _fp_http,
+    "HTTP-Alt":      _fp_http,
+    "HTTPS-Alt":     _fp_http,
+    "Redis":         _fp_redis,
+    "Memcached":     _fp_memcached,
+    "MySQL":         _fp_mysql,
+    "PostgreSQL":    _fp_postgresql,
+    "MongoDB":       _fp_mongodb,
+    "Elasticsearch": _fp_elasticsearch,
+}
+
+
+def _fingerprint_banner(service: str, raw: str) -> tuple[str, str]:
+    """
+    Return (product, version) from a raw service banner.
+
+    Dispatches to the service-specific fingerprint function.
+    Both fields may be empty strings if the banner is unrecognised.
+    """
+    if not raw:
+        return "", ""
+    func = _FINGERPRINT_FUNCS.get(service)
+    if func:
+        try:
+            return func(raw)
+        except Exception:
+            log.debug("Fingerprint error for service %s", service, exc_info=True)
+    return "", ""
+
+
+def _extract_version(service: str, raw: str) -> str:
+    """
+    Return a combined 'product version' display string for a raw banner.
+
+    Kept for backward compatibility; prefer _fingerprint_banner() for
+    structured access to product and version separately.
+    """
+    product, version = _fingerprint_banner(service, raw)
+    if product and version:
+        return f"{product} {version}"
+    return product or version
+
+
+# Retain for tests that import _VERSION_PATTERNS
+_VERSION_PATTERNS: list = []
 
 
 # ─────────────────────────────────────────────────────────────
@@ -109,10 +279,12 @@ _VERSION_PATTERNS: list[tuple[str, re.Pattern, str]] = [
 @dataclass
 class PortResult:
     port: int
-    state: str          # "open" | "closed" | "filtered"
-    service: str = ""
-    banner: str = ""
-    version: str = ""   # extracted version string
+    state: str              # "open" | "closed" | "filtered"
+    service: str = ""       # service type from SERVICE_MAP (e.g. "SSH", "HTTP")
+    product: str = ""       # identified product (e.g. "OpenSSH", "Apache", "nginx")
+    version: str = ""       # version string (e.g. "8.9p1", "2.4.41")
+    banner: str = ""        # first 120 chars of raw banner
+    confidence: str = "low" # "high" = version identified, "medium" = banner grabbed, "low" = no banner
     protocol: str = "tcp"
 
 
@@ -126,41 +298,28 @@ class ScanResult:
 
 
 # ─────────────────────────────────────────────────────────────
-# Banner / version grabbing
+# Banner grabbing
 # ─────────────────────────────────────────────────────────────
 
-def _extract_version(service: str, raw: str) -> str:
-    """Try every version pattern and return the first match."""
-    for svc, pattern, template in _VERSION_PATTERNS:
-        m = pattern.search(raw)
-        if m:
-            try:
-                version = m.expand(template).strip()
-                return version
-            except Exception:
-                return m.group(0)[:60]
-    return ""
-
-
-async def _grab_banner(host: str, port: int, timeout: float = 2.0) -> tuple[str, str]:
+async def _grab_banner(
+    host: str,
+    port: int,
+    timeout: float = 2.0,
+) -> tuple[str, str, str]:
     """
     Protocol-aware banner grab.
-    Returns (raw_banner, version_string).
+
+    Returns (raw_banner, product, version).
+    All fields are empty strings on failure.
     """
     try:
         probe_entry = _PROBES.get(port)
-        if probe_entry is None:
-            probe_bytes, read_bytes = b"\r\n", 256
-        else:
-            probe_bytes, read_bytes = probe_entry
+        probe_bytes, read_bytes = probe_entry if probe_entry else (b"\r\n", 256)
 
-        # Substitute {host} placeholder in HTTP probes
         if b"{host}" in probe_bytes:
             probe_bytes = probe_bytes.replace(b"{host}", host.encode())
 
-        # For TLS ports grab via ssl context
-        use_tls = port in (443, 8443, 465, 636, 993, 995, 2376)
-        if use_tls:
+        if port in _TLS_PORTS:
             ctx = ssl.create_default_context()
             ctx.check_hostname = False
             ctx.verify_mode = ssl.CERT_NONE
@@ -186,11 +345,11 @@ async def _grab_banner(host: str, port: int, timeout: float = 2.0) -> tuple[str,
         raw = data.decode(errors="replace").strip()
         banner = raw[:120]
         service = SERVICE_MAP.get(port, "")
-        version = _extract_version(service, raw)
-        return banner, version
+        product, version = _fingerprint_banner(service, raw)
+        return banner, product, version
 
     except Exception:
-        return "", ""
+        return "", "", ""
 
 
 # ─────────────────────────────────────────────────────────────
@@ -206,7 +365,7 @@ async def _scan_port(
     delay: float = 0.0,
     jitter: float = 0.0,
 ) -> Optional[PortResult]:
-    """Scan a single TCP port."""
+    """Scan a single TCP port and optionally grab a service banner."""
     async with semaphore:
         if delay or jitter:
             import random
@@ -221,16 +380,26 @@ async def _scan_port(
                 pass
 
             service = SERVICE_MAP.get(port, "Unknown")
-            banner, version = "", ""
+            banner, product, version = "", "", ""
             if grab_banners:
-                banner, version = await _grab_banner(host, port, timeout)
+                banner, product, version = await _grab_banner(host, port, timeout)
+
+            confidence: str
+            if version:
+                confidence = "high"
+            elif banner:
+                confidence = "medium"
+            else:
+                confidence = "low"
 
             return PortResult(
                 port=port,
                 state="open",
                 service=service,
-                banner=banner,
+                product=product,
                 version=version,
+                banner=banner,
+                confidence=confidence,
             )
         except (asyncio.TimeoutError, ConnectionRefusedError, OSError):
             return None
@@ -246,21 +415,22 @@ async def scan(
     jitter: float = 0.0,
 ) -> ScanResult:
     """
-    Async TCP port scan with protocol-aware version detection.
+    Async TCP port scan with protocol-aware service/version detection.
 
     Args:
         target: Hostname or IP address.
         ports: List of ports to scan. Defaults to top 100 common ports.
         concurrency: Max concurrent connections.
         timeout: Per-port connection timeout in seconds.
-        grab_banners: Whether to grab service banners / extract versions.
-        delay: Fixed delay (seconds) between each port probe.
+        grab_banners: Whether to grab service banners and extract version info.
+        delay: Fixed delay (seconds) between each port probe (safe/low-noise mode).
         jitter: Random additional delay 0–jitter seconds per probe.
 
     Returns:
-        ScanResult with all open ports, services, and version strings.
+        ScanResult with all open ports, identified products, and version strings.
     """
     ports = ports or TOP_100_PORTS
+    log.debug("Scanning %s — %d ports (concurrency=%d)", target, len(ports), concurrency)
 
     try:
         ip = socket.gethostbyname(target)
@@ -296,6 +466,7 @@ async def scan(
         [r for r in results if r is not None],
         key=lambda r: r.port,
     )
+    log.debug("Scan complete: %d/%d ports open", len(open_ports), len(ports))
 
     return ScanResult(
         host=target,
@@ -307,14 +478,16 @@ async def scan(
 
 def parse_port_range(port_spec: str) -> list[int]:
     """
-    Parse a port specification string into a list of ports.
+    Parse a port specification string into a sorted list of port numbers.
 
-    Supports:
-      - Single port: "80"
-      - Range: "1-1024"
-      - Comma-separated: "22,80,443"
-      - Mixed: "22,80-90,443"
-      - Presets: "top100", "top1000", "all"
+    Supported formats:
+      top100       — built-in list of the 100 most common ports
+      top1000      — top 100 + ports 1–1024
+      all          — every port from 1 to 65535
+      80           — single port
+      1-1024       — range (inclusive)
+      22,80,443    — comma-separated list
+      22,80-90,443 — mixed format
     """
     if port_spec == "top100":
         return TOP_100_PORTS
