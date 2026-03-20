@@ -47,6 +47,8 @@ from reconx.core import udp_scanner, web_crawler, ip_intel, passive_sources
 from reconx.core.severity import aggregate_findings
 from reconx.utils import report
 from reconx.utils.state import ScanState, state_file_for
+from reconx.utils.correlation import correlate
+from reconx.plugins import registry as plugin_registry
 from reconx import config as config_module
 
 
@@ -407,6 +409,29 @@ async def _run_scan(
     findings = aggregate_findings(collected)
     display_severity_summary(findings)
     collected["_findings"] = findings
+
+    # ── Asset Correlation ─────────────────────────────────────
+    try:
+        corr_result = correlate(collected)
+        collected["correlation"] = corr_result
+        if corr_result.correlated_findings:
+            print_info(
+                f"[dim]Correlation: {len(corr_result.correlated_findings)} correlated finding(s), "
+                f"{len(corr_result.host_roles)} host(s) classified[/dim]"
+            )
+    except Exception as _corr_exc:  # noqa: BLE001
+        import logging as _logging
+        _logging.getLogger(__name__).warning("Correlation failed: %s", _corr_exc)
+
+    # ── Plugin Runner ─────────────────────────────────────────
+    if plugin_registry.all:
+        print_section(f"Plugins ({len(plugin_registry.all)})", "🧩")
+        plugin_results = await plugin_registry.run_all(target, prof, collected, timeout=60.0)
+        for pr in plugin_results:
+            if pr.findings:
+                print_info(f"  [{pr.plugin_name}] {len(pr.findings)} finding(s)")
+                collected["_findings"] = list(collected.get("_findings", [])) + pr.findings
+        collected["plugin_results"] = plugin_results
 
     # ── Reports ──────────────────────────────────────────────
     if report_name:
