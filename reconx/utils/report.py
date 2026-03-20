@@ -1,23 +1,26 @@
 """
 Report generation — JSON and self-contained HTML reports.
 
-v1.2 upgrades:
-  - Per-finding severity badges (CRITICAL / HIGH / MEDIUM / LOW / INFO)
-  - Summary cards include severity breakdown
-  - Collapsible sections via <details>
-  - Inline SVG mini-charts (open ports by service, severity pie)
-  - UDP, IP Intel, Web Crawl, Passive Sources sections
-  - Severity-coloured finding rows
+v1.4 upgrades:
+  - Schema versioning in JSON output
+  - Executive summary section (risk rating, key stats, top findings)
+  - Confidence score badges per finding
+  - Remediation guidance per finding (collapsible)
+  - Asset inventory section from correlation data
+  - Correlation findings section (admin hosts, shadow subdomains, etc.)
+  - Per-finding evidence list
+  - References (OWASP / RFC links)
 """
 
 import json
 import datetime
 from datetime import timezone
-from dataclasses import asdict
 from pathlib import Path
 from typing import Any
 
 from reconx import __version__
+
+SCHEMA_VERSION = "1.4"
 
 
 # ─────────────────────────────────────────────────────────────
@@ -41,6 +44,7 @@ def save_json(data: dict, output_path: str) -> str:
     path = Path(output_path)
     path.parent.mkdir(parents=True, exist_ok=True)
     payload = {
+        "schema_version": SCHEMA_VERSION,
         "reconx_version": __version__,
         "generated_at": datetime.datetime.now(timezone.utc).isoformat() + "Z",
         **{k: _serialise(v) for k, v in data.items()},
@@ -94,12 +98,19 @@ def _section(title: str, icon: str, content: str, anchor: str = "",
     return inner
 
 
-def _findings_html(findings: list, module: str = "") -> str:
+def _conf_badge(confidence: int) -> str:
+    """Render a small confidence percentage badge."""
+    col = "red" if confidence >= 90 else "orange" if confidence >= 70 else "yellow" if confidence >= 50 else "muted"
+    return f'<span class="badge badge-{col}" style="font-size:10px" title="Confidence">{confidence}%</span>'
+
+
+def _findings_html(findings: list, module: str = "", show_remediation: bool = True) -> str:
     """
     Render a list of findings as HTML rows.
 
     Accepts:
-      - Finding dataclass objects (severity, title, detail, module)
+      - Finding dataclass objects (severity, title, detail, module, confidence,
+        evidence, remediation, references, affected)
       - Plain strings (severity auto-classified)
       - Dicts with "sev", "title", "module" keys (internal use)
     """
@@ -113,27 +124,71 @@ def _findings_html(findings: list, module: str = "") -> str:
             title = f.title
             detail = getattr(f, "detail", "")
             mod = getattr(f, "module", module)
+            confidence = getattr(f, "confidence", 0)
+            evidence = getattr(f, "evidence", [])
+            remediation = getattr(f, "remediation", "")
+            references = getattr(f, "references", [])
+            affected = getattr(f, "affected", "")
         elif isinstance(f, dict) and "sev" in f:
-            # Internal dict format {"sev": ..., "title": ..., "module": ...}
             sev = f["sev"]
             title = f.get("title", "")
             detail = f.get("detail", "")
             mod = f.get("module", module)
+            confidence = f.get("confidence", 0)
+            evidence = f.get("evidence", [])
+            remediation = f.get("remediation", "")
+            references = f.get("references", [])
+            affected = f.get("affected", "")
         else:
             title = str(f)
             detail = ""
             sev = _classify_severity(title)
             mod = module
+            confidence = 0
+            evidence = []
+            remediation = ""
+            references = []
+            affected = ""
 
         fg, bg = _SEV_COLOURS.get(sev, ("#c9d1d9", "#161b22"))
         mod_tag = f'<span style="font-size:10px;opacity:0.6;margin-left:6px">[{mod}]</span>' if mod else ""
+        conf_tag = _conf_badge(confidence) if confidence else ""
+        affected_tag = (
+            f'<span style="font-size:10px;color:#58a6ff;margin-left:6px" title="Affected">{affected}</span>'
+            if affected else ""
+        )
         detail_html = f'<div style="font-size:12px;opacity:0.7;margin-top:2px">{detail}</div>' if detail else ""
+
+        # Evidence list
+        evidence_html = ""
+        if evidence:
+            ev_items = "".join(
+                f'<li style="font-size:11px;color:#8b949e;font-family:monospace">{e}</li>'
+                for e in evidence[:5]
+            )
+            evidence_html = f'<details style="margin-top:4px"><summary style="cursor:pointer;font-size:11px;color:#8b949e">Evidence ({len(evidence)})</summary><ul style="margin:4px 0 0 16px">{ev_items}</ul></details>'
+
+        # Remediation + references
+        remediation_html = ""
+        if show_remediation and remediation:
+            ref_links = ""
+            if references:
+                ref_links = " ".join(
+                    f'<a href="{r}" target="_blank" style="font-size:10px;color:#58a6ff;margin-right:6px">{r.split("/")[2] if "/" in r else r}</a>'
+                    for r in references[:3]
+                )
+            remediation_html = f"""<details style="margin-top:4px">
+  <summary style="cursor:pointer;font-size:11px;color:#3fb950">Remediation</summary>
+  <div style="font-size:12px;padding:4px 0;color:#c9d1d9">{remediation}</div>
+  {f'<div style="margin-top:2px">{ref_links}</div>' if ref_links else ""}
+</details>"""
+
         html += f"""<div class="finding-row" style="border-left-color:{fg};background:{bg}">
-  <div style="display:flex;align-items:center;gap:8px">
-    {_sev_badge(sev)}{mod_tag}
+  <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap">
+    {_sev_badge(sev)}{conf_tag}{mod_tag}{affected_tag}
     <span>{title}</span>
   </div>
-  {detail_html}
+  {detail_html}{evidence_html}{remediation_html}
 </div>\n"""
     return html
 
@@ -260,6 +315,18 @@ _STYLE = """
   .empty { color: var(--muted); font-style: italic; padding: 8px 0; }
   .chart-box { background: #0d1117; border: 1px solid var(--border); border-radius: 6px; padding: 12px; margin-top: 12px; }
   .two-col { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
+  /* Executive summary */
+  .exec-summary { background: #1c2128; border: 1px solid var(--border); border-radius: 8px; padding: 16px 20px; margin-bottom: 16px; }
+  .risk-badge { display: inline-block; padding: 4px 16px; border-radius: 20px; font-size: 13px; font-weight: 700; letter-spacing: 1px; }
+  .risk-critical { background: #3d1c1c; color: #f85149; border: 1px solid #f85149; }
+  .risk-high     { background: #3d2000; color: #db6d28; border: 1px solid #db6d28; }
+  .risk-medium   { background: #332d00; color: #d29922; border: 1px solid #d29922; }
+  .risk-low      { background: #1b4332; color: #3fb950; border: 1px solid #3fb950; }
+  .risk-info     { background: #1c2d3d; color: #58a6ff; border: 1px solid #58a6ff; }
+  /* Asset inventory */
+  .asset-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 12px; margin-top: 8px; }
+  .asset-box { background: #0d1117; border: 1px solid var(--border); border-radius: 6px; padding: 10px 14px; }
+  .asset-box-title { font-size: 11px; text-transform: uppercase; letter-spacing: 1px; color: var(--muted); margin-bottom: 6px; }
   @media (max-width: 700px) { .two-col { grid-template-columns: 1fr; } .header { flex-direction: column; gap: 12px; } }
 """
 
@@ -491,6 +558,174 @@ def _passive_section(passive: dict) -> tuple[str, str]:
 
 
 # ─────────────────────────────────────────────────────────────
+# Executive summary
+# ─────────────────────────────────────────────────────────────
+
+def _risk_level(counts: dict[str, int]) -> str:
+    """Derive overall risk level from finding severity counts."""
+    if counts.get("CRITICAL", 0) > 0:
+        return "CRITICAL"
+    if counts.get("HIGH", 0) > 0:
+        return "HIGH"
+    if counts.get("MEDIUM", 0) > 0:
+        return "MEDIUM"
+    if counts.get("LOW", 0) > 0:
+        return "LOW"
+    return "INFO"
+
+
+def _executive_summary(
+    target: str,
+    all_findings: list,
+    collected: dict,
+) -> str:
+    """Render an executive summary block."""
+    counts: dict[str, int] = {"CRITICAL": 0, "HIGH": 0, "MEDIUM": 0, "LOW": 0, "INFO": 0}
+    for f in all_findings:
+        sev = f.get("sev", "INFO") if isinstance(f, dict) else (
+            (f.severity.value if hasattr(f.severity, "value") else str(f.severity))
+            if hasattr(f, "severity") else "INFO"
+        )
+        counts[sev] = counts.get(sev, 0) + 1
+
+    risk = _risk_level(counts)
+    risk_css = f"risk-{risk.lower()}"
+
+    # Quick stats
+    open_ports = 0
+    scan = collected.get("port_scan")
+    if scan:
+        op = getattr(scan, "open_ports", scan.get("open_ports", []) if isinstance(scan, dict) else [])
+        open_ports = len(op)
+
+    sub_count = 0
+    subs = collected.get("subdomains")
+    if subs:
+        sl = getattr(subs, "subdomains", subs.get("subdomains", []) if isinstance(subs, dict) else [])
+        sub_count = len(sl)
+
+    tech_count = 0
+    http_results = collected.get("http", [])
+    if http_results:
+        tech_set: set = set()
+        for r in http_results:
+            r_d = r if isinstance(r, dict) else _serialise(r)
+            for t in r_d.get("technologies", []):
+                tech_set.add(t.get("name", ""))
+        tech_count = len(tech_set)
+
+    total_findings = sum(counts.values())
+
+    # Top critical/high findings
+    top_findings: list = []
+    for f in all_findings:
+        if isinstance(f, dict):
+            if f.get("sev") in ("CRITICAL", "HIGH"):
+                top_findings.append(f)
+        elif hasattr(f, "severity"):
+            sev_val = f.severity.value if hasattr(f.severity, "value") else str(f.severity)
+            if sev_val in ("CRITICAL", "HIGH"):
+                top_findings.append(f)
+        if len(top_findings) >= 5:
+            break
+
+    top_html = ""
+    if top_findings:
+        items = ""
+        for f in top_findings[:5]:
+            t = f.get("title", "") if isinstance(f, dict) else getattr(f, "title", "")
+            s = f.get("sev", "HIGH") if isinstance(f, dict) else (
+                f.severity.value if hasattr(f.severity, "value") else "HIGH"
+            )
+            items += f'<li>{_sev_badge(s)} {t}</li>'
+        top_html = f'<div style="margin-top:12px"><b style="font-size:12px;color:var(--muted)">Key Findings:</b><ul style="margin:6px 0 0 20px;list-style:disc">{items}</ul></div>'
+
+    stats = f"""
+<div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(120px,1fr));gap:12px;margin-top:12px">
+  <div style="text-align:center"><div style="font-size:22px;font-weight:700;color:var(--accent)">{total_findings}</div><div style="font-size:11px;color:var(--muted)">TOTAL FINDINGS</div></div>
+  <div style="text-align:center"><div style="font-size:22px;font-weight:700;color:#f85149">{counts['CRITICAL']}</div><div style="font-size:11px;color:var(--muted)">CRITICAL</div></div>
+  <div style="text-align:center"><div style="font-size:22px;font-weight:700;color:#db6d28">{counts['HIGH']}</div><div style="font-size:11px;color:var(--muted)">HIGH</div></div>
+  <div style="text-align:center"><div style="font-size:22px;font-weight:700;color:var(--accent)">{open_ports}</div><div style="font-size:11px;color:var(--muted)">OPEN PORTS</div></div>
+  <div style="text-align:center"><div style="font-size:22px;font-weight:700;color:var(--accent)">{sub_count}</div><div style="font-size:11px;color:var(--muted)">SUBDOMAINS</div></div>
+  <div style="text-align:center"><div style="font-size:22px;font-weight:700;color:var(--accent)">{tech_count}</div><div style="font-size:11px;color:var(--muted)">TECHNOLOGIES</div></div>
+</div>"""
+
+    return f"""<div class="exec-summary">
+  <div style="display:flex;align-items:center;gap:12px;flex-wrap:wrap">
+    <div>
+      <div style="font-size:12px;color:var(--muted);margin-bottom:4px">OVERALL RISK</div>
+      <span class="risk-badge {risk_css}">{risk}</span>
+    </div>
+    <div style="flex:1;min-width:200px">
+      <div style="font-size:12px;color:var(--muted)">Target: <span style="color:var(--accent);font-family:monospace">{target}</span></div>
+      <div style="font-size:12px;color:var(--muted);margin-top:2px">Scanned with ReconX v{__version__} on {datetime.datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M UTC')}</div>
+    </div>
+  </div>
+  {stats}{top_html}
+</div>"""
+
+
+# ─────────────────────────────────────────────────────────────
+# Correlation / asset inventory section
+# ─────────────────────────────────────────────────────────────
+
+def _correlation_section(corr: Any) -> tuple[str, str]:
+    """Build the Asset Correlation section from a CorrelationResult."""
+    c = corr if isinstance(corr, dict) else _serialise(corr)
+
+    # Host role table
+    host_roles = c.get("host_roles", {})
+    role_rows = ""
+    for host, role in list(host_roles.items())[:30]:
+        role_col = {
+            "admin": "red", "staging": "yellow", "dev": "yellow",
+            "api": "blue", "prod": "green", "cdn": "muted",
+        }.get(role, "muted")
+        role_rows += f"<tr><td style='font-family:monospace'>{host}</td><td>{_badge(role, role_col)}</td></tr>"
+
+    # Asset inventory boxes
+    all_ips = c.get("all_ips", [])
+    ssl_confirmed = c.get("ssl_confirmed_subdomains", [])
+    not_in_san = c.get("subdomains_not_in_san", [])
+    cloud = c.get("cloud_providers", [])
+
+    assets_html = f"""<div class="asset-grid">
+  <div class="asset-box">
+    <div class="asset-box-title">Unique IPs</div>
+    {''.join(f'<div style="font-family:monospace;font-size:12px">{ip}</div>' for ip in all_ips[:20]) or '<span class="empty">—</span>'}
+  </div>
+  <div class="asset-box">
+    <div class="asset-box-title">SSL-Confirmed Subdomains ({len(ssl_confirmed)})</div>
+    {''.join(f'<div style="font-size:12px;color:#3fb950">{s}</div>' for s in ssl_confirmed[:15]) or '<span class="empty">None</span>'}
+  </div>
+  <div class="asset-box">
+    <div class="asset-box-title">Not in SSL SAN ({len(not_in_san)})</div>
+    {''.join(f'<div style="font-size:12px;color:#d29922">{s}</div>' for s in not_in_san[:15]) or '<span class="empty">None</span>'}
+  </div>
+  <div class="asset-box">
+    <div class="asset-box-title">Cloud Providers</div>
+    {''.join(f'<div>{_badge(p, "blue")}</div>' for p in cloud) or '<span class="empty">Unknown</span>'}
+  </div>
+</div>"""
+
+    role_table = f"""<div style="margin-top:16px">
+  <b style="font-size:12px;color:var(--muted)">Host Role Classification</b>
+  <table style="margin-top:8px"><tr><th>Host</th><th>Inferred Role</th></tr>
+    {role_rows or '<tr><td colspan="2" class="empty">No hosts classified</td></tr>'}
+  </table>
+</div>"""
+
+    # Correlated findings
+    corr_findings = c.get("correlated_findings", [])
+    corr_findings_html = ""
+    if corr_findings:
+        corr_findings_html = "<div style='margin-top:16px'><b style='font-size:12px;color:var(--muted)'>Correlated Findings</b><br><br>" + _findings_html(corr_findings, "correlation") + "</div>"
+
+    content = assets_html + role_table + corr_findings_html
+    return content, '<a href="#correlation">Correlation</a>'
+
+
+# ─────────────────────────────────────────────────────────────
 # Main HTML generator
 # ─────────────────────────────────────────────────────────────
 
@@ -504,6 +739,11 @@ def generate_html(data: dict, output_path: str) -> str:
     sections_html = ""
     nav_links = ""
     cards: list[tuple[str, str, str, str]] = []   # (anchor, number, label, colour_class)
+
+    # Promote structured Finding objects into all_findings early so executive
+    # summary can access them.  We also collect string findings below.
+    pre_findings = data.get("_findings", [])
+
 
     # ── Collect all findings for severity summary ──────────────
     all_findings = []
@@ -689,21 +929,55 @@ def generate_html(data: dict, output_path: str) -> str:
         nav_links += passive_nav
         _collect_str_findings(pd2.get("findings", []), "passive")
 
+    # ── Correlation / Asset Inventory ────────────────────────
+    correlation = data.get("correlation")
+    if correlation:
+        corr_content, corr_nav = _correlation_section(correlation)
+        sections_html += _section("Asset Correlation & Inventory", "🔗", corr_content, "correlation",
+                                  collapsible=False)
+        nav_links += corr_nav
+        # Include correlated findings in all_findings
+        c_d = correlation if isinstance(correlation, dict) else _serialise(correlation)
+        for cf in c_d.get("correlated_findings", []):
+            all_findings.append(cf)
+
     # ── Severity Summary (prepended, always shown) ───────────
-    if all_findings:
-        counts = {"CRITICAL": 0, "HIGH": 0, "MEDIUM": 0, "LOW": 0, "INFO": 0}
-        for f in all_findings:
-            counts[f["sev"]] = counts.get(f["sev"], 0) + 1
+    # Merge pre-scan structured findings (Finding dataclass objects)
+    merged_findings: list = list(pre_findings) + [
+        f for f in all_findings if not isinstance(f, dict) or "sev" not in f
+    ]
+    # Also keep dict-format findings from module parsing
+    dict_findings = [f for f in all_findings if isinstance(f, dict) and "sev" in f]
+    merged_findings = list(pre_findings) + dict_findings + [
+        f for f in all_findings
+        if not (isinstance(f, dict) and "sev" in f) and f not in pre_findings
+    ]
+
+    if merged_findings:
+        counts: dict[str, int] = {"CRITICAL": 0, "HIGH": 0, "MEDIUM": 0, "LOW": 0, "INFO": 0}
+        for f in merged_findings:
+            if isinstance(f, dict) and "sev" in f:
+                sev = f["sev"]
+            elif hasattr(f, "severity"):
+                sev = f.severity.value if hasattr(f.severity, "value") else str(f.severity)
+            else:
+                sev = "INFO"
+            counts[sev] = counts.get(sev, 0) + 1
 
         # Severity cards
         for sev, col_class in [("CRITICAL", "critical"), ("HIGH", "high"), ("MEDIUM", "medium")]:
-            if counts[sev]:
+            if counts.get(sev, 0):
                 cards.insert(0, ("findings", str(counts[sev]), f"{sev} Findings", col_class))
 
         chart_html = f'<div class="chart-box">{_severity_chart(counts)}</div>'
-        findings_content = chart_html + "<br>" + _findings_html(all_findings)
+        findings_content = chart_html + "<br>" + _findings_html(merged_findings)
         sections_html = _section("Security Findings", "⚠️", findings_content, "findings") + sections_html
         nav_links = '<a href="#findings">⚠️ Findings</a>' + nav_links
+    else:
+        merged_findings = all_findings
+
+    # ── Executive Summary (always first) ──────────────────────
+    exec_html = _executive_summary(target, merged_findings, data)
 
     # ── Render ────────────────────────────────────────────────
     cards_html = "".join(
@@ -718,7 +992,7 @@ def generate_html(data: dict, output_path: str) -> str:
         version=__version__,
         nav_links=nav_links,
         summary_cards=cards_html,
-        sections=sections_html,
+        sections=exec_html + sections_html,
         style=_STYLE,
         js=_JS,
     )

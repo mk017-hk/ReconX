@@ -2,13 +2,14 @@
 Subdomain enumeration module.
 
 Combines:
-  1. DNS brute-force from a wordlist
+  1. DNS brute-force from a wordlist (with wildcard detection + filtering)
   2. Certificate Transparency log lookup (crt.sh)
   3. (Optional) passive source: HackerTarget
 """
 
 import asyncio
 import socket
+import uuid
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Optional
@@ -48,6 +49,8 @@ class SubdomainResult:
     domain: str
     subdomains: list[Subdomain] = field(default_factory=list)
     total_checked: int = 0
+    wildcard_detected: bool = False
+    wildcard_ips: list[str] = field(default_factory=list)
     error: Optional[str] = None
 
 
@@ -68,11 +71,25 @@ async def _resolve(hostname: str) -> list[str]:
         return []
 
 
+async def _detect_wildcard(domain: str) -> list[str]:
+    """
+    Probe a random non-existent subdomain to detect wildcard DNS.
+
+    Returns the IPs the wildcard resolves to, or an empty list if no
+    wildcard is active.
+    """
+    random_label = uuid.uuid4().hex[:12]
+    probe = f"{random_label}.{domain}"
+    ips = await _resolve(probe)
+    return ips
+
+
 async def _bruteforce_chunk(
     domain: str,
     words: list[str],
     semaphore: asyncio.Semaphore,
     results: list[Subdomain],
+    wildcard_ips: set[str],
 ) -> None:
     with Progress(
         SpinnerColumn(),
@@ -91,7 +108,12 @@ async def _bruteforce_chunk(
                 hostname = f"{word}.{domain}"
                 ips = await _resolve(hostname)
                 if ips:
-                    results.append(Subdomain(name=hostname, ips=ips, source="bruteforce"))
+                    # Suppress wildcard hits — a subdomain is genuine only if at
+                    # least one of its IPs is NOT in the wildcard set.
+                    if wildcard_ips and set(ips).issubset(wildcard_ips):
+                        pass  # wildcard match — skip
+                    else:
+                        results.append(Subdomain(name=hostname, ips=ips, source="bruteforce"))
                 progress.update(task_id, advance=1, found=len(results))
 
         await asyncio.gather(*[_check(w) for w in words])
@@ -173,6 +195,12 @@ async def enumerate(
         ]
     result.total_checked = len(words)
 
+    # ── Wildcard detection ───────────────────────────────────
+    wildcard_ips = await _detect_wildcard(domain)
+    if wildcard_ips:
+        result.wildcard_detected = True
+        result.wildcard_ips = wildcard_ips
+
     found: list[Subdomain] = []
     semaphore = asyncio.Semaphore(concurrency)
 
@@ -181,7 +209,7 @@ async def enumerate(
     if use_passive:
         passive_tasks = [_crtsh_lookup(domain), _hackertarget_lookup(domain)]
 
-    brute_task = _bruteforce_chunk(domain, words, semaphore, found)
+    brute_task = _bruteforce_chunk(domain, words, semaphore, found, set(wildcard_ips))
 
     if passive_tasks:
         brute_result, *passive_results = await asyncio.gather(

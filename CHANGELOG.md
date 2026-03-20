@@ -7,6 +7,41 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ---
 
+## [1.4.0] — 2026-03-20
+
+### Added
+- **Finding confidence model** — `Finding` dataclass gains `confidence` (0-100), `evidence: list[str]`, `affected: str`, `remediation: str`, and `references: list[str]` fields; auto-populated remediation hints and OWASP/RFC reference links via lookup tables in `severity.py`
+- **Layered fingerprinting engine** — `http_probe.py` now uses multi-signal detection for every technology signature (headers + body + cookies); each signal carries an individual weight; a technology is only reported when accumulated confidence meets its threshold; `Technology.confidence` and `Technology.evidence` fields added
+- **Safe validation checks** — HTTP probing now includes: CORS policy analysis (`_analyse_cors`), cloud bucket reference scanning (`_find_cloud_bucket_refs`), robots.txt sensitive path disclosure (`_fetch_robots`), backup file probing (`_BACKUP_PATHS`), and directory listing detection (`_check_directory_listing`); results stored in `HTTPResult.cors_issues`, `cloud_bucket_refs`, `robots_disallowed`, `validation_findings`
+- **Asset correlation layer** — new `reconx/utils/correlation.py`: cross-references SSL SANs with discovered subdomains, classifies host roles by subdomain prefix (api, admin, staging, dev, cdn, mail, vpn, prod), builds asset inventory (all IPs, open port summary, cloud providers), and generates correlated findings (admin host reachable, shadow subdomains, staging alongside prod)
+- **Wildcard DNS detection** — `subdomain.enumerate()` probes a random UUID subdomain before brute-force; hits whose IPs are a subset of the wildcard set are suppressed; `SubdomainResult` gains `wildcard_detected` and `wildcard_ips` fields
+- **Plugin architecture** — `reconx/plugins/base.py` introduces a `@runtime_checkable` `ReconPlugin` Protocol (name, version, category, description, author, async run()); `PluginRegistry` with `register`, `unregister`, `get`, `all`, and `run_all` (concurrent, per-plugin `asyncio.wait_for` timeout); module-level `registry` singleton
+- **Retry utility** — `reconx/utils/retry.py`: `@retry_async` decorator and `run_with_retry` function; exponential back-off with configurable retries, base delay, max delay, jitter, and exception filter
+- **Report upgrades**:
+  - `schema_version: "1.4"` field in JSON output
+  - Executive summary block (risk badge, key stats grid, top critical/high findings)
+  - Confidence percentage badge per finding row
+  - Collapsible evidence list per finding
+  - Collapsible remediation + reference links per finding
+  - Asset Correlation & Inventory section (host roles, SSL-confirmed subdomains, IPs, cloud providers)
+  - Correlation findings rendered in reports
+- **CLI wiring** — `_run_scan()` now calls `correlate(collected)` and `plugin_registry.run_all()` after findings aggregation; results stored under `collected["correlation"]` and `collected["plugin_results"]`
+
+### Changed
+- `deduplicate_findings()` added to `severity.py`; keeps highest-confidence duplicate per `(title.lower(), module, affected)` key
+- `sort_findings()` now uses `(severity_order, -confidence)` as sort key
+- `make_finding()` gains keyword-only args: `confidence`, `description`, `evidence`, `affected`, `remediation`, `references`
+- Version bumped to `1.4.0` in `reconx/__init__.py` and `pyproject.toml`
+
+### Tests
+- `tests/test_correlation.py` — host role classification, SSL SAN cross-reference, correlated finding generation, deduplication
+- `tests/test_fingerprint.py` — multi-signal fingerprinting, CORS analysis, cloud bucket detection, directory listing detection
+- `tests/test_plugins.py` — protocol conformance, registry CRUD, `run_all()` concurrency, timeout isolation, error handling
+- `tests/test_subdomain.py` — wildcard detection, wildcard suppression, non-wildcard kept
+- `tests/test_severity.py` — extended Finding fields, `deduplicate_findings()`, confidence sort
+
+---
+
 ## [1.3.1] — 2026-03-15
 
 ### Security
